@@ -450,7 +450,9 @@ protected:
 	void cam_SetLadder();
 	void cam_UnsetLadder();
 	void camUpdateFreelook(float dt);
-	float currentFOV(bool wantSVPFov = false); // pip wantSVPFov true returns the zoomed fov, false keeps the main view wide while the SVP zooms
+public:
+	float currentFOV(bool wantSVPFov = false);
+protected: // pip wantSVPFov true returns the zoomed fov, false keeps the main view wide while the SVP zooms
 
 	// Cameras
 	CCameraBase* cameras[eacMaxCam];
