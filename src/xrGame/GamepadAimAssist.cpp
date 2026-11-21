@@ -487,7 +487,7 @@ float Magnification(const CWeapon* w, const CCameraBase* cam)
 {
 	float fov = cam ? cam->f_fov : g_fov;
 	if (w && Device.m_SecondViewport.IsSVPActive() && w->IsZoomed())
-		fov = w->GetSecondVPFov();
+		fov = Actor() ? Actor()->currentFOV(true) : (w->GetSecondVPZoomFactor() * 0.75f);
 	if (fov < 0.5f || fov > 179.f)
 		return 1.f;
 	const float t0 = tanf(deg2rad(g_fov) * 0.5f);
