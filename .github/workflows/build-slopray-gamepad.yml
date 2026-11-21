@@ -1,0 +1,85 @@
+name: Build Slop-Ray 0.7.2 + Gamepad
+
+on:
+  workflow_dispatch:
+    inputs:
+      configs:
+        description: 'Build configurations: both, DX12, or DX11-AVX'
+        required: false
+        default: 'both'
+  push:
+    branches: [ "gamepad-*" ]
+
+jobs:
+  build:
+    name: Build ${{ matrix.buildconf }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        buildconf: ["DX12", "DX11-AVX"]
+
+    steps:
+    - name: Configure Pagefile
+      uses: al-cheb/configure-pagefile-action@v1.3
+      with:
+        minimum-size: 8GB
+        maximum-size: 8GB
+        disk-root: "C:"
+
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Ensure optick-git submodule
+      shell: pwsh
+      run: |
+        $optDir = "src\3rd party\optick-git"
+        if (!(Test-Path "$optDir\src\optick.h")) {
+          Write-Host "Downloading pinned optick (8abd28dee1a4034c973a3d32cd1777118e72df7e)..."
+          Invoke-WebRequest -Uri "https://github.com/bombomby/optick/archive/8abd28dee1a4034c973a3d32cd1777118e72df7e.zip" -OutFile "optick.zip"
+          Expand-Archive -Path "optick.zip" -DestinationPath "optick_tmp" -Force
+          New-Item -ItemType Directory -Force -Path $optDir | Out-Null
+          Copy-Item -Recurse -Force "optick_tmp\optick-8abd28dee1a4034c973a3d32cd1777118e72df7e\*" "$optDir\"
+          Remove-Item -Recurse -Force "optick_tmp", "optick.zip"
+        }
+
+    - name: Ensure SDL3 3.4.18 VC devel
+      shell: pwsh
+      run: |
+        $sdlDir = "src\3rd party\SDL3"
+        if (!(Test-Path "$sdlDir\lib\x64\SDL3.lib") -or !(Test-Path "$sdlDir\include\SDL3\SDL.h")) {
+          Write-Host "Downloading SDL3-devel-3.4.18-VC.zip..."
+          Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip" -OutFile "sdl3.zip"
+          Expand-Archive -Path "sdl3.zip" -DestinationPath "sdl3_tmp" -Force
+          New-Item -ItemType Directory -Force -Path "$sdlDir\include", "$sdlDir\lib\x64" | Out-Null
+          Copy-Item -Recurse -Force "sdl3_tmp\SDL3-3.4.18\include\*" "$sdlDir\include\"
+          Copy-Item -Force "sdl3_tmp\SDL3-3.4.18\lib\x64\SDL3.lib", "sdl3_tmp\SDL3-3.4.18\lib\x64\SDL3.dll" "$sdlDir\lib\x64\"
+          Remove-Item -Recurse -Force "sdl3_tmp", "sdl3.zip"
+        }
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: "x64"
+
+    - name: Build ${{ matrix.buildconf }}
+      run: msbuild /m /p:Configuration=${{ matrix.buildconf }} /p:Platform=x64 src/engine-vs2022.sln
+
+    - name: Stage bin artifact
+      shell: pwsh
+      run: |
+        $out = "dist_${{ matrix.buildconf }}"
+        New-Item -ItemType Directory -Force -Path $out | Out-Null
+        Copy-Item "_build\_game\bin_dbg\*.exe" $out -Force
+        Copy-Item "src\3rd party\SDL3\lib\x64\SDL3.dll" $out -Force
+        Get-ChildItem $out
+
+    - name: Upload ${{ matrix.buildconf }} EXE + SDL3.dll
+      uses: actions/upload-artifact@v4
+      with:
+        name: SlopRay-0.7.2-Gamepad-${{ matrix.buildconf }}
+        path: dist_${{ matrix.buildconf }}/*
+        if-no-files-found: error
+        retention-days: 14
