@@ -20,6 +20,11 @@ IC CHitMemoryManager::CHitMemoryManager(CCustomMonster* object, CAI_Stalker* sta
 #endif
 }
 
+IC bool CHitMemoryManager::has_objects() const
+{
+	return (m_hits != 0);
+}
+
 IC const CHitMemoryManager::HITS& CHitMemoryManager::objects() const
 {
 	VERIFY(m_hits);

@@ -142,9 +142,9 @@ void CUIScrollView::RecalcSize()
 	pad_size.set(0.0f, 0.0f);
 
 	Fvector2 item_pos;
-	item_pos.set(m_rightIndent, m_vertInterval + m_upIndent);
+	item_pos.set(m_rightIndent, m_vertInterval + m_upIndent + m_gamepadEdgePadding);
 	pad_size.y += m_upIndent;
-	pad_size.y += m_downIndent;
+	pad_size.y += m_downIndent + 2.0f * m_gamepadEdgePadding;
 
 	xrCriticalSectionGuard guard(m_pad->csUi);
 	if (m_sort_function)
@@ -189,6 +189,15 @@ void CUIScrollView::RecalcSize()
 
 	m_flags.set(eNeedRecalc, FALSE);
 	m_visible_rgn.set(-1, -1);
+}
+
+void CUIScrollView::SetGamepadEdgePadding(float padding)
+{
+	if (!fsimilar(m_gamepadEdgePadding, padding))
+	{
+		m_gamepadEdgePadding = padding;
+		ForceUpdate();
+	}
 }
 
 void CUIScrollView::UpdateScroll()

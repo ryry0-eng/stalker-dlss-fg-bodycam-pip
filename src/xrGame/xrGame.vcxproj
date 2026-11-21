@@ -1499,6 +1499,17 @@
     <ClInclude Include="patrol_path_storage_inline.h" />
     <ClInclude Include="patrol_point.h" />
     <ClInclude Include="patrol_point_inline.h" />
+    <ClInclude Include="PauseTokenManager.h" />
+    <ClInclude Include="GamepadFocusGraph.h" />
+    <ClInclude Include="GamepadTxnDispatcher.h" />
+    <ClInclude Include="GamepadModalStack.h" />
+    <ClInclude Include="GamepadWidgets.h" />
+    <ClInclude Include="GamepadContextDispatcher.h" />
+    <ClInclude Include="GpHintXray.h" />
+    <ClInclude Include="GamepadAimAssist.h" />
+    <ClInclude Include="GamepadCalibrationWnd.h" />
+    <ClInclude Include="GamepadRemapWnd.h" />
+    <ClInclude Include="GamepadOnScreenKeyboard.h" />
     <ClInclude Include="PDA.h" />
     <ClInclude Include="PdaMsg.h" />
     <ClInclude Include="pda_space.h" />
@@ -3909,6 +3920,29 @@
     </ClCompile>
     <ClCompile Include="patrol_path_storage.cpp" />
     <ClCompile Include="patrol_point.cpp" />
+    <ClCompile Include="PauseTokenManager.cpp" />
+    <ClCompile Include="GamepadFocusGraph.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="GamepadTxnDispatcher.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="GamepadModalStack.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="GamepadWidgets.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="GamepadContextDispatcher.cpp" />
+    <ClCompile Include="GpHintXray.cpp" />
+    <ClCompile Include="GamepadAimAssist.cpp" />
+    <ClCompile Include="GamepadCalibrationWnd.cpp" />
+    <ClCompile Include="GamepadRemapWnd.cpp" />
+    <ClCompile Include="GamepadOnScreenKeyboard.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="PDA.cpp">
       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>

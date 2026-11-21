@@ -23,9 +23,53 @@
 #endif
 #include <luabind/luabind.hpp>
 #include "script_game_object.h"
+#include "../xrEngine/xr_input.h"
+#include "PauseTokenManager.h"
+
+extern ENGINE_API int ps_gp_telemetry;
+
+// C4.2: прототип телеметрии CActor::OnEvent
+static LPCSTR GetActorEventTypeName(u16 type)
+{
+	switch (type)
+	{
+	case GE_TRADE_BUY: return "GE_TRADE_BUY";
+	case GE_OWNERSHIP_TAKE: return "GE_OWNERSHIP_TAKE";
+	case GE_TRADE_SELL: return "GE_TRADE_SELL";
+	case GE_OWNERSHIP_REJECT: return "GE_OWNERSHIP_REJECT";
+	case GE_INV_ACTION: return "GE_INV_ACTION";
+	case GEG_PLAYER_ITEM2SLOT: return "GEG_PLAYER_ITEM2SLOT";
+	case GEG_PLAYER_ITEM2BELT: return "GEG_PLAYER_ITEM2BELT";
+	case GEG_PLAYER_ITEM2RUCK: return "GEG_PLAYER_ITEM2RUCK";
+	case GEG_PLAYER_ITEM_EAT: return "GEG_PLAYER_ITEM_EAT";
+	case GEG_PLAYER_ACTIVATEARTEFACT: return "GEG_PLAYER_ACTIVATEARTEFACT";
+	case GEG_PLAYER_ACTIVATE_SLOT: return "GEG_PLAYER_ACTIVATE_SLOT";
+	case GEG_PLAYER_DISABLE_SPRINT: return "GEG_PLAYER_DISABLE_SPRINT";
+	case GEG_PLAYER_WEAPON_HIDE_STATE: return "GEG_PLAYER_WEAPON_HIDE_STATE";
+	case GE_MOVE_ACTOR: return "GE_MOVE_ACTOR";
+	case GE_ACTOR_MAX_POWER: return "GE_ACTOR_MAX_POWER";
+	case GE_ACTOR_MAX_HEALTH: return "GE_ACTOR_MAX_HEALTH";
+	case GEG_PLAYER_ATTACH_HOLDER: return "GEG_PLAYER_ATTACH_HOLDER";
+	case GEG_PLAYER_DETACH_HOLDER: return "GEG_PLAYER_DETACH_HOLDER";
+	case GEG_PLAYER_PLAY_HEADSHOT_PARTICLE: return "GEG_PLAYER_PLAY_HEADSHOT_PARTICLE";
+	case GE_ACTOR_JUMPING: return "GE_ACTOR_JUMPING";
+	default: return "GE_OTHER";
+	}
+}
 
 void CActor::OnEvent(NET_Packet& P, u16 type)
 {
+	if (ps_gp_telemetry && pInput)
+	{
+		string256 line;
+		xr_sprintf(line, sizeof(line), "actor_on_event,%u,%u,%s,%d",
+		           Device.dwTimeContinual,
+		           static_cast<u32>(type),
+		           GetActorEventTypeName(type),
+		           Device.Paused() ? 1 : 0);
+		pInput->WriteGamepadTelemetryLine(line);
+	}
+
 	inherited::OnEvent(P, type);
 	CInventoryOwner::OnEvent(P, type);
 
@@ -67,6 +111,7 @@ void CActor::OnEvent(NET_Packet& P, u16 type)
 				inventory().Take(_GO, false, true);
 
 				SelectBestWeapon(Obj);
+				CPauseTokenManager::Instance().OnActorInventoryEvent(type, id);
 			}
 			else
 			{
@@ -155,6 +200,7 @@ void CActor::OnEvent(NET_Packet& P, u16 type)
 
 			if (!just_before_destroy)
 				SelectBestWeapon(Obj);
+			CPauseTokenManager::Instance().OnActorInventoryEvent(type, id);
 		}
 		break;
 	case GE_INV_ACTION:
@@ -262,6 +308,7 @@ void CActor::OnEvent(NET_Packet& P, u16 type)
 					}
 				}
 			} //switch
+			CPauseTokenManager::Instance().OnActorInventoryEvent(type, id);
 		}
 		break; //1
 	case GEG_PLAYER_ACTIVATE_SLOT:
@@ -281,6 +328,7 @@ void CActor::OnEvent(NET_Packet& P, u16 type)
 			if (m_block_sprint_counter > 0)
 			{
 				mstate_wishful &= ~mcSprint;
+				m_bGamepadSprint = false;
 			}
 			else
 				m_block_sprint_counter = 0;

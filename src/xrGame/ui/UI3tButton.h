@@ -52,6 +52,10 @@ public:
 		return (state != S_Enabled && m_bUseTextColor[state]) ? m_dwTextColor[state] : m_dwTextColor[S_Enabled];
 	}
 
+	// INV-REWORK-21: smooth text color blend (t 0..1; t < 0 = standard state color)
+	void SetTextBlend(float t) { m_fTextBlend = t; }
+	float m_fTextBlend = -1.0f;
+	LPCSTR GamepadFocusArt();
 	u32 m_dwTextColor[4];
 	bool m_bUseTextColor[4]; // note: 0 index will be ignored
 

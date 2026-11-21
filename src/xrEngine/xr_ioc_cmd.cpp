@@ -12,6 +12,8 @@
 #include "environment.h"
 #include "IGame_Persistent.h"
 #include "xr_input.h"
+#include "GamepadHaptics.h"
+#include "GamepadErrorGuard.h"
 #include "CustomHUD.h"
 
 #include "../Include/xrRender/RenderDeviceRender.h"
@@ -1286,6 +1288,276 @@ public:
 	}
 };
 
+// C1.1: прототип, настройки — Этап D (в user.ltx не сохраняются)
+class CCC_GamepadTelemetry : public CCC_Integer
+{
+public:
+	CCC_GamepadTelemetry(LPCSTR N, int* V, int _min = 0, int _max = 1)
+		: CCC_Integer(N, V, _min, _max)
+	{
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadState : public IConsole_Command
+{
+public:
+	CCC_GamepadState(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		(void)args;
+		if (pInput)
+			pInput->LogGamepadState();
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadDevices : public IConsole_Command
+{
+public:
+	CCC_GamepadDevices(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		(void)args;
+		if (pInput)
+			pInput->LogGamepadDevices();
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadVJoyHotplug : public IConsole_Command
+{
+public:
+	CCC_GamepadVJoyHotplug(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		int cycles = 100;
+		if (args && args[0])
+		{
+			const int parsed = atoi(args);
+			if (parsed > 0)
+				cycles = parsed;
+		}
+		if (pInput)
+			pInput->RunVirtualGamepadHotplugTest(cycles);
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// D1.2: команда gp_source и консольные параметры гистерезиса (без записи в user.ltx)
+class CCC_GamepadFloatNoSave : public CCC_Float
+{
+public:
+	CCC_GamepadFloatNoSave(LPCSTR N, float* V, float _min, float _max)
+		: CCC_Float(N, V, _min, _max)
+	{
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadSource : public IConsole_Command
+{
+public:
+	CCC_GamepadSource(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (!pInput)
+			return;
+
+		if (!args || !args[0] || EQ(args, "status"))
+		{
+			pInput->LogInputSourceState();
+		}
+		else if (EQ(args, "kbm"))
+		{
+			pInput->ForceActiveInputSource(CInput::EActiveInputSource::KBM, "console_kbm");
+		}
+		else if (EQ(args, "gamepad"))
+		{
+			pInput->ForceActiveInputSource(CInput::EActiveInputSource::Gamepad, "console_gamepad");
+		}
+		else if (EQ(args, "auto"))
+		{
+			pInput->SetInputSourceLockMode(CInput::EInputSourceLockMode::Auto, true, "console_auto");
+		}
+		else if (EQ(args, "gamepad_only") || EQ(args, "only_gamepad"))
+		{
+			pInput->SetInputSourceLockMode(CInput::EInputSourceLockMode::GamepadOnly, true, "console_gamepad_only");
+		}
+		else if (EQ(args, "kbm_only") || EQ(args, "off") || EQ(args, "disabled"))
+		{
+			pInput->SetInputSourceLockMode(CInput::EInputSourceLockMode::KbmOnly, true, "console_kbm_only");
+		}
+		else if (EQ(args, "selftest"))
+		{
+			pInput->RunInputSourceSelfTest();
+		}
+		else
+		{
+			InvalidSyntax();
+		}
+	}
+
+	virtual void Status(TStatus& S) override
+	{
+		if (pInput)
+			xr_strcpy(S, CInput::GetInputSourceName(pInput->GetActiveInputSource()));
+		else
+			xr_strcpy(S, "kbm");
+	}
+
+	virtual void Info(TInfo& I) override
+	{
+		xr_strcpy(I, "[status|kbm|gamepad|auto|gamepad_only|kbm_only|selftest]");
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// D5.2: команда gp_rumble_test и консольные ползунки микшера вибрации CGamepadHaptics
+class CCC_GamepadHapticsFloat : public CCC_GamepadFloatNoSave
+{
+public:
+	CCC_GamepadHapticsFloat(LPCSTR N, float* V, float _min, float _max)
+		: CCC_GamepadFloatNoSave(N, V, _min, _max)
+	{
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		CCC_GamepadFloatNoSave::Execute(args);
+		if (pInput && pInput->GetGamepadHaptics())
+		{
+			pInput->GetGamepadHaptics()->SyncSlidersFromCVarsAndSave();
+		}
+	}
+};
+
+class CCC_GamepadRumbleTest : public IConsole_Command
+{
+public:
+	CCC_GamepadRumbleTest(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (pInput && pInput->GetGamepadHaptics())
+		{
+			pInput->GetGamepadHaptics()->ExecuteConsoleTestCommand(args);
+		}
+	}
+
+	virtual void Info(TInfo& I) override
+	{
+		xr_strcpy(I, "[recoil|damage|anomaly|jam|explosion|stop|status|save|load|reset] [scale] [duration_ms]");
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// S3: команда gp_error_log [status|selftest|simulate_seh|simulate_cpp|simulate_onframe]
+class CCC_GamepadErrorLog : public IConsole_Command
+{
+public:
+	CCC_GamepadErrorLog(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (!args || !args[0] || EQ(args, "status"))
+		{
+			Msg("* [Gamepad] gp_error_log status: total_guarded_errors=%u primary_path='%s' secondary_path='%s' last_written='%s'",
+			    gperr::GetTotalProtectedFrameErrors(),
+			    gperr::GetPrimaryErrorLogPath().c_str(),
+			    gperr::GetSecondaryErrorLogPath().c_str(),
+			    gperr::GetLastWrittenFilePath().c_str());
+		}
+		else if (EQ(args, "selftest"))
+		{
+			const bool ok = gperr::RunSelfTest(gperr::GetPrimaryErrorLogPath().c_str());
+			Msg("* [Gamepad] gp_error_log selftest: %s (path='%s')",
+			    ok ? "PASSED" : "FAILED",
+			    gperr::GetPrimaryErrorLogPath().c_str());
+		}
+		else if (EQ(args, "simulate_seh"))
+		{
+			gperr::ArmSimulatedFaultNextFrame(gperr::ESimulatedFaultMode::RaiseSehAccessViolationInPoll);
+			Msg("* [Gamepad] gp_error_log: armed SEH access violation for next CInput::GamepadUpdate frame");
+		}
+		else if (EQ(args, "simulate_cpp"))
+		{
+			gperr::ArmSimulatedFaultNextFrame(gperr::ESimulatedFaultMode::ThrowCppExceptionInPoll);
+			Msg("* [Gamepad] gp_error_log: armed C++ exception for next CInput::GamepadUpdate frame");
+		}
+		else if (EQ(args, "simulate_onframe"))
+		{
+			gperr::ArmSimulatedFaultNextFrame(gperr::ESimulatedFaultMode::ThrowCppExceptionInOnFrame);
+			Msg("* [Gamepad] gp_error_log: armed fault for next CPauseTokenManager::OnFrame frame");
+		}
+		else
+		{
+			InvalidSyntax();
+		}
+	}
+
+	virtual void Info(TInfo& I) override
+	{
+		xr_strcpy(I, "[status|selftest|simulate_seh|simulate_cpp|simulate_onframe]");
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+
 ENGINE_API float psHUD_FOV_def = 0.45f;
 ENGINE_API float psHUD_FOV = psHUD_FOV_def;
 ENGINE_API float psCamAttachedFOV = 83.f;
@@ -1604,6 +1876,26 @@ void CCC_Register()
 	CMD2(CCC_Integer, "scope_2dtexactive", &scope_2dtexactive);
 	CMD1(CCC_Editor, "rs_editor");
 	CMD1(CCC_EnvModsReload, "env_mods_reload");
+	CMD4(CCC_GamepadTelemetry, "gp_telemetry", &ps_gp_telemetry, 0, 1);
+	CMD1(CCC_GamepadState, "gp_state");
+	CMD1(CCC_GamepadDevices, "gp_devices");
+	CMD1(CCC_GamepadVJoyHotplug, "gp_vjoy_hotplug");
+	CMD1(CCC_GamepadSource, "gp_source");
+	// D1.2-N5 (D2.2): базовый порог стика в арбитраже берётся из профиля калибровки (gpmath::GetCalibrationStickDeadzone)
+	CMD4(CCC_GamepadFloatNoSave, "gp_source_stick_hysteresis", &ps_gp_source_stick_hysteresis, 0.0f, 0.50f);
+	CMD4(CCC_GamepadTelemetry, "gp_source_stick_hold_ms", &ps_gp_source_stick_hold_ms, 0, 2000);
+	// D1.2b-N8: threshold is in raw DirectInput mouse counts per frame (depends on mouse DPI)
+	CMD4(CCC_GamepadTelemetry, "gp_source_mouse_px", &ps_gp_source_mouse_px_threshold, 1, 200);
+	CMD4(CCC_GamepadTelemetry, "gp_source_cooldown_ms", &ps_gp_source_cooldown_ms, 0, 5000);
+	// D5.2: Haptics mixer commands and sliders (saved in $app_data_root$\gamepad\profile.ltx [haptics], not user.ltx)
+	CMD1(CCC_GamepadRumbleTest, "gp_rumble_test");
+	CMD4(CCC_GamepadHapticsFloat, "gp_haptics_master", &ps_gp_haptics_master, 0.0f, 1.0f);
+	CMD4(CCC_GamepadHapticsFloat, "gp_haptics_recoil", &ps_gp_haptics_recoil, 0.0f, 1.0f);
+	CMD4(CCC_GamepadHapticsFloat, "gp_haptics_damage", &ps_gp_haptics_damage, 0.0f, 1.0f);
+	CMD4(CCC_GamepadHapticsFloat, "gp_haptics_anomaly", &ps_gp_haptics_anomaly, 0.0f, 1.0f);
+	CMD4(CCC_GamepadHapticsFloat, "gp_haptics_jam", &ps_gp_haptics_jam, 0.0f, 1.0f);
+	CMD4(CCC_GamepadHapticsFloat, "gp_haptics_explosion", &ps_gp_haptics_explosion, 0.0f, 1.0f);
+	CMD1(CCC_GamepadErrorLog, "gp_error_log");
 #ifdef DEBUG
     extern BOOL debug_destroy;
     CMD4(CCC_Integer, "debug_destroy", &debug_destroy, FALSE, TRUE);

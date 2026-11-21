@@ -329,11 +329,20 @@ void CUIMapWnd::SetTargetMap(CUICustomMap* m, const Fvector2& pos, bool bZoomIn)
 	ResetActionPlanner();
 }
 
-void CUIMapWnd::MoveMap(Fvector2 const& pos_delta)
+void CUIMapWnd::MoveMap(Fvector2 const& pos_delta, bool keepHint)
 {
 	GlobalMap()->MoveWndDelta(pos_delta);
 	UpdateScroll();
-	HideCurHint();
+	if (!keepHint)
+	{
+		HideCurHint();
+	}
+	else if (m_map_location_hint && m_map_location_hint->GetOwner())
+	{
+		CMapSpot* ownerSpot = smart_cast<CMapSpot*>(m_map_location_hint->GetOwner());
+		if (ownerSpot && FindGamepadSpotUnderCursor() != ownerSpot)
+			HideCurHint();
+	}
 
 	// Cancel any in-progress zoom/pan easing. Without this the action planner
 	// would lerp the map rect back toward m_desiredMapRect on the next Update,
@@ -462,7 +471,7 @@ bool CUIMapWnd::OnMouseAction(float x, float y, EUIMessages mouse_action)
 			ActivatePropertiesBox(NULL);
 			break;
 		case WINDOW_MOUSE_MOVE:
-			if (pInput->iGetAsyncBtnState(0))
+			if (pInput->iGetAsyncBtnState(0) || (pInput->IsGamepadActiveSource() && (pInput->GetGamepadState().buttons_mask & (1u << CInput::GP_BTN_SOUTH)) != 0))
 			{
 				MoveMap(GetUICursor().GetCursorPositionDelta());
 				return true;
@@ -1178,4 +1187,381 @@ void CUIMapWnd::SpotSelected(CUIWindow* w)
 		funct(ml->ObjectID(),
 			ml->GetLevelName().c_str(),
 			ml->spot_type);
+}
+
+bool CUIMapWnd::CloseGamepadPropertiesBox()
+{
+	if (m_UIPropertiesBox && m_UIPropertiesBox->IsShown())
+	{
+		m_UIPropertiesBox->Hide();
+		return true;
+	}
+	return false;
+}
+
+static void CollectMapSpotsFromWindow(CUIWindow* mapWnd, const Frect& clipRect, xr_vector<Frect>& outRects)
+{
+	if (!mapWnd || !mapWnd->IsShown())
+		return;
+	auto& children = mapWnd->GetChildWndList();
+	for (auto it = children.begin(); it != children.end(); ++it)
+	{
+		CMapSpot* sp = smart_cast<CMapSpot*>(*it);
+		if (!sp || !sp->IsShown() || !sp->MapLocation())
+			continue;
+		Frect r;
+		sp->GetAbsoluteRect(r);
+		if (r.width() <= 2.0f || r.height() <= 2.0f)
+			continue;
+		const float cx = (r.x1 + r.x2) * 0.5f;
+		const float cy = (r.y1 + r.y2) * 0.5f;
+		if (cx >= clipRect.x1 && cx <= clipRect.x2 && cy >= clipRect.y1 && cy <= clipRect.y2)
+			outRects.push_back(r);
+	}
+}
+
+void CUIMapWnd::GatherGamepadMapSpotTargets(xr_vector<Frect>& outRects) const
+{
+	CUIMapWnd* self = const_cast<CUIMapWnd*>(this);
+	const Frect clipRect = self->ActiveMapRect();
+	if (m_GlobalMap)
+		CollectMapSpotsFromWindow(m_GlobalMap, clipRect, outRects);
+	for (auto it = m_GameMaps.begin(); it != m_GameMaps.end(); ++it)
+	{
+		if (it->second && it->second != m_GlobalMap)
+			CollectMapSpotsFromWindow(it->second, clipRect, outRects);
+	}
+}
+
+extern int ps_gp_pda_reticle_size; // UICursor.cpp (FIX-LIVE3 p.13)
+
+// FIX-LIVE3 p.17: smooth gamepad zoom. Applied immediately (no 0.5 s planner ease), keeps the
+// map point under the centre of the visible area fixed, same planner idle state as MoveMap.
+void CUIMapWnd::GamepadZoomSmooth(float factor)
+{
+	CUIGlobalMap* gm = GlobalMap();
+	if (!gm || gm->Locked() || factor <= 0.0f)
+		return;
+	const float prev = GetZoom();
+	Frect vis_rect = ActiveMapRect();
+	Fvector2 c;
+	vis_rect.getcenter(c);
+	Fvector2 pos;
+	gm->GetAbsolutePos(pos);
+	c.sub(pos);
+	c.div(gm->GetCurrentZoom());
+	SetZoom(prev * factor);
+	if (fsimilar(prev, GetZoom()))
+		return;
+	Frect r;
+	gm->CalcOpenRect(c, r, GetZoom());
+	gm->SetWndRect(r);
+	gm->Update();
+	UpdateScroll();
+	HideCurHint();
+	m_tgtCenter = c;
+	m_ActionPlanner->m_storage.set_property(1, true);
+	m_ActionPlanner->m_storage.set_property(2, false);
+	m_ActionPlanner->m_storage.set_property(3, false);
+}
+
+// FIX-LIVE3 p.14: nearest visible spot to p within radius (reticle magnet); outCenter = its centre.
+CMapSpot* CUIMapWnd::FindGamepadSpotNear(const Fvector2& p, float radius, Fvector2* outCenter) const
+{
+	CUIMapWnd* self = const_cast<CUIMapWnd*>(this);
+	const Frect clipRect = self->ActiveMapRect();
+	CMapSpot* bestSpot = nullptr;
+	float bestDistSq = radius * radius;
+	Fvector2 bestC = p;
+	auto scanMap = [&](CUIWindow* mapWnd)
+	{
+		if (!mapWnd || !mapWnd->IsShown())
+			return;
+		for (CUIWindow* w : mapWnd->GetChildWndList())
+		{
+			CMapSpot* sp = smart_cast<CMapSpot*>(w);
+			if (!sp || !sp->IsShown() || !sp->MapLocation())
+				continue;
+			Frect r;
+			sp->GetAbsoluteRect(r);
+			if (r.width() <= 2.0f || r.height() <= 2.0f)
+				continue;
+			const float cx = (r.x1 + r.x2) * 0.5f;
+			const float cy = (r.y1 + r.y2) * 0.5f;
+			if (!clipRect.in(cx, cy))
+				continue;
+			const float d2 = (p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy);
+			if (d2 < bestDistSq)
+			{
+				bestDistSq = d2;
+				bestSpot = sp;
+				bestC.set(cx, cy);
+			}
+		}
+	};
+	for (auto it = m_GameMaps.begin(); it != m_GameMaps.end(); ++it)
+		if (it->second && it->second != m_GlobalMap)
+			scanMap(it->second);
+	if (m_GlobalMap)
+		scanMap(m_GlobalMap);
+	if (bestSpot && outCenter)
+		*outCenter = bestC;
+	return bestSpot;
+}
+
+CMapSpot* CUIMapWnd::FindGamepadSpotUnderCursor(float radius) const
+{
+	CUIMapWnd* self = const_cast<CUIMapWnd*>(this);
+	const Frect clipRect = self->ActiveMapRect();
+	const Fvector2 cur = GetUICursor().GetCursorPosition();
+	if (!clipRect.in(cur.x, cur.y))
+		return nullptr;
+
+	CMapSpot* bestSpot = nullptr;
+	if (radius <= 0.0f)
+		radius = float(clampr(ps_gp_pda_reticle_size, 20, 64)) * 0.5f + 2.0f;
+	float bestDistSq = radius * radius;
+
+	auto scanMap = [&](CUIWindow* mapWnd)
+	{
+		if (!mapWnd || !mapWnd->IsShown())
+			return;
+		auto& children = mapWnd->GetChildWndList();
+		for (auto it = children.rbegin(); it != children.rend(); ++it)
+		{
+			CMapSpot* sp = smart_cast<CMapSpot*>(*it);
+			if (!sp || !sp->IsShown() || !sp->MapLocation())
+				continue;
+			Frect r;
+			sp->GetAbsoluteRect(r);
+			if (r.width() <= 2.0f || r.height() <= 2.0f)
+				continue;
+			const float cx = (r.x1 + r.x2) * 0.5f;
+			const float cy = (r.y1 + r.y2) * 0.5f;
+			if (!clipRect.in(cx, cy))
+				continue;
+			const float dx = cur.x - cx;
+			const float dy = cur.y - cy;
+			float d2 = dx * dx + dy * dy;
+			if (r.in(cur.x, cur.y))
+				d2 *= 0.25f;
+			if (d2 <= bestDistSq)
+			{
+				bestDistSq = d2;
+				bestSpot = sp;
+			}
+		}
+	};
+
+	for (auto it = m_GameMaps.begin(); it != m_GameMaps.end(); ++it)
+	{
+		if (it->second && it->second != m_GlobalMap)
+			scanMap(it->second);
+	}
+	if (m_GlobalMap)
+		scanMap(m_GlobalMap);
+
+	return bestSpot;
+}
+
+bool CUIMapWnd::HandleGamepadContextMenuOrCenter(bool bForceContextMenu, Fvector2* outSnapPos)
+{
+	const Fvector2 cur = GetUICursor().GetCursorPosition();
+	const Frect mapRect = ActiveMapRect();
+	CMapSpot* spotUnder = FindGamepadSpotUnderCursor();
+
+	if (spotUnder || (bForceContextMenu && mapRect.in(cur.x, cur.y)))
+	{
+		if (GlobalMap() && !GlobalMap()->hoveredMap)
+		{
+			for (auto it = m_GameMaps.begin(); it != m_GameMaps.end(); ++it)
+			{
+				if (it->second && it->second != m_GlobalMap && it->second->IsShown())
+				{
+					Frect r;
+					it->second->GetAbsoluteRect(r);
+					if (r.in(cur.x, cur.y))
+					{
+						GlobalMap()->hoveredMap = it->second;
+						break;
+					}
+				}
+			}
+		}
+
+		ActivatePropertiesBox(spotUnder);
+		if (m_UIPropertiesBox && m_UIPropertiesBox->IsShown() && m_UIPropertiesBox->GetItemsCount() > 0)
+		{
+			if (outSnapPos)
+			{
+				CUIListBoxItem* targetItem = nullptr;
+				for (u32 i = 0, n = m_UIPropertiesBox->GetItemsCount(); i < n; ++i)
+				{
+					CUIListBoxItem* itm = m_UIPropertiesBox->GetItemByIDX(i);
+					if (itm)
+					{
+						targetItem = itm;
+						if (i == 1) // index 0 is often the header when spot properties are added
+							break;
+					}
+				}
+				if (targetItem)
+				{
+					Frect ir;
+					targetItem->GetAbsoluteRect(ir);
+					outSnapPos->set((ir.x1 + ir.x2) * 0.5f, (ir.y1 + ir.y2) * 0.5f);
+				}
+			}
+			return true;
+		}
+		if (bForceContextMenu)
+			return false;
+	}
+
+	if (bForceContextMenu)
+		return false;
+
+	ViewActor();
+	return true;
+}
+
+bool CUIMapWnd::GetGamepadQuickPawTarget(u16& outObjId, Fvector& outWorldPos, u32& outLvid, u32& outGvid, shared_str& outLevelName)
+{
+	outObjId = u16(65535);
+	outWorldPos.set(0.0f, 0.0f, 0.0f);
+	outLvid = u32(-1);
+	outGvid = u32(-1);
+	outLevelName = "";
+
+	const Fvector2 cur = GetUICursor().GetCursorPosition();
+	const Frect mapRect = ActiveMapRect();
+	if (!mapRect.in(cur.x, cur.y))
+		return false;
+
+	CMapSpot* top = FindGamepadSpotUnderCursor();
+	if (top && top->MapLocation())
+	{
+		outObjId = top->MapLocation()->ObjectID();
+		outLevelName = top->MapLocation()->GetLevelName();
+	}
+
+	auto gm = GlobalMap();
+	if (!gm)
+		return (outObjId != u16(65535));
+
+	CUICustomMap* lm = gm->hoveredMap;
+	if (!lm || lm == gm)
+	{
+		for (auto it = m_GameMaps.begin(); it != m_GameMaps.end(); ++it)
+		{
+			if (it->second && it->second != gm && it->second->IsShown())
+			{
+				Frect r;
+				it->second->GetAbsoluteRect(r);
+				if (r.in(cur.x, cur.y))
+				{
+					lm = it->second;
+					gm->hoveredMap = lm;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!lm || lm == gm)
+		return (outObjId != u16(65535));
+
+	Frect lm_rect;
+	lm_rect.set(0, 0, 0, 0);
+	lm->GetAbsoluteRect(lm_rect);
+
+	Frect lm_wa = lm->WorkingArea();
+	lm_rect.lt.sub(lm_wa.lt);
+	lm_rect.rb.sub(lm_wa.rb);
+
+	Fvector2 lm_zoom = lm->GetCurrentZoom();
+	lm_rect.lt.div(lm_zoom);
+	lm_rect.rb.div(lm_zoom);
+
+	Fvector2 lm_cursor_pos = cur;
+	lm_cursor_pos.sub(mapRect.lt);
+	lm_cursor_pos.mul(-1.0f);
+	lm_cursor_pos.div(lm_zoom);
+
+	Frect lm_bound_rect = lm->BoundRect();
+	Fvector2 lm_bound_size = { 0, 0 };
+	lm_bound_rect.getsize(lm_bound_size);
+
+	Fvector2 lm_mouse_pos = { 0, 0 };
+	lm_mouse_pos.add(lm_rect.lt).add(lm_cursor_pos);
+
+	Fvector2 lm_real_mouse_pos = { 0, 0 };
+	Fvector2 lm_adjusted_mouse_pos = { 0, 0 };
+	lm_adjusted_mouse_pos.add(lm_mouse_pos).mul(-1.0f).mul(lm_zoom);
+
+	lm_real_mouse_pos.x = lm_bound_rect.lt.x + lm_adjusted_mouse_pos.x / lm_zoom.x;
+	lm_real_mouse_pos.y = lm_bound_rect.height() + lm_bound_rect.lt.y - lm_adjusted_mouse_pos.y / lm_zoom.x;
+	lm_real_mouse_pos.x /= UI().get_current_kx();
+
+	LPCSTR lm_name = lm->MapName().c_str();
+	outLevelName = lm_name;
+	outWorldPos.set(lm_real_mouse_pos.x, 0.0f, lm_real_mouse_pos.y);
+
+	if (g_pGameLevel && (0 == xr_strcmp(g_pGameLevel->name().c_str(), lm_name)))
+	{
+		collide::rq_result R;
+		CObject* ignore = Actor();
+		Fbox lm_bv = g_pGameLevel->ObjectSpace.GetBoundingVolume();
+		Fvector start = { lm_real_mouse_pos.x, lm_bv.max.y, lm_real_mouse_pos.y };
+		Fvector dir = { 0, -1, 0 };
+		float range = lm_bv.max.y - lm_bv.min.y;
+		if (Level().ObjectSpace.RayPick(start, dir, range, collide::rqtStatic, R, ignore))
+		{
+			Fvector res;
+			res.mad(start, dir, R.range);
+			outWorldPos.y = res.y;
+			outLvid = ai().level_graph().vertex_id(outWorldPos);
+		}
+	}
+
+	const bool lvid_not_set = (outLvid == u32(-1));
+	auto& gg = ai().game_graph();
+	u32 current_gvid = 0;
+	float dist = FLT_MAX;
+	while (gg.valid_vertex_id(current_gvid))
+	{
+		try
+		{
+			auto vertex = gg.vertex(current_gvid);
+			if (!vertex)
+			{
+				current_gvid++;
+				continue;
+			}
+			GameGraph::_LEVEL_ID level_id = vertex->level_id();
+			const GameGraph::LEVEL_MAP& levels = ai().game_graph().header().levels();
+			GameGraph::LEVEL_MAP::const_iterator I = levels.find(level_id);
+			if (I != levels.end() && (0 == xr_strcmp(I->second.name().c_str(), lm_name)))
+			{
+				Fvector3 pos = vertex->level_point();
+				float d = outWorldPos.distance_to_xz_sqr(pos);
+				if (d < dist)
+				{
+					dist = d;
+					outGvid = current_gvid;
+					if (lvid_not_set)
+					{
+						outLvid = vertex->level_vertex_id();
+						outWorldPos.y = pos.y;
+					}
+				}
+			}
+		}
+		catch (...)
+		{
+		}
+		current_gvid++;
+	}
+
+	return true;
 }

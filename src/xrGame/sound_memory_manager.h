@@ -99,6 +99,7 @@ public:
 	void enable(const CObject* object, bool enable);
 
 public:
+	IC bool has_objects() const;
 	IC const SOUNDS& objects() const;
 	const CSoundObject* object_by_id(u16 id) const;
 #ifdef USE_SELECTED_SOUND

@@ -25,6 +25,8 @@
 
 #include "../build_config_defines.h"
 #include "WeaponRG6.h"
+#include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
 
 extern ENGINE_API bool g_dedicated_server;
 ENGINE_API extern float psHUD_FOV_def;
@@ -268,7 +270,13 @@ void CWeaponMagazined::FireStart()
 		//-Alundaio
 
 		if (smart_cast<CActor*>(this->H_Parent()) && (Level().CurrentViewEntity() == H_Parent()))
+		{
 			CurrentGameUI()->AddCustomStatic("gun_jammed", true);
+			if (pInput && pInput->GetGamepadHaptics())
+			{
+				pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Jam, 1.0f, 0, "WeaponMagazined::FireStart(misfire)");
+			}
+		}
 
 		OnEmptyClick();
 	}
@@ -931,6 +939,12 @@ void CWeaponMagazined::OnShot()
 
 	// Эффект сдвига (отдача)
 	AddHUDShootingEffect();
+
+	// D5.2: отдача выстрела для локального актора (с маршрутизацией в правый курковый мотор при cap_trigger_rumble по D40)
+	if (ParentIsActor() && pInput && pInput->GetGamepadHaptics())
+	{
+		pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Recoil, 1.0f, 0, "WeaponMagazined::OnShot");
+	}
 }
 
 void CWeaponMagazined::OnEmptyClick()

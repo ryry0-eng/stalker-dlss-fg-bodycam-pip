@@ -1,7 +1,12 @@
 #include "stdafx.h"
+#include "GpHintXray.h"
 #include "MainMenu.h"
+#include "GamepadOnScreenKeyboard.h"
+#include "GamepadCalibrationWnd.h"
+#include "GamepadRemapWnd.h"
 #include "UI/UIDialogWnd.h"
 #include "ui/UIMessageBoxEx.h"
+#include "ui/UIEditKeyBind.h"
 #include "../xrEngine/xr_IOConsole.h"
 #include "../xrEngine/IGame_Level.h"
 #include "../xrEngine/CameraManager.h"
@@ -12,6 +17,7 @@
 #include <dinput.h>
 #include "ui\UIBtnHint.h"
 #include "UICursor.h"
+#include "GamepadContextDispatcher.h"
 #include "gamespy/CdkeyDecode/cdkeydecode.h"
 #include "string_table.h"
 #include "../xrCore/os_clipboard.h"
@@ -261,6 +267,11 @@ void CMainMenu::Activate(bool bActivate)
 			Console->Show();
 		}
 
+		// CR1-09: close singleton gamepad modals before CleanInternals wipes holder stack without Show(false)
+		CGamepadOnScreenKeyboardUI::Instance().CloseCancel("main_menu_deactivate");
+		CGamepadCalibrationUI::Instance().Close("main_menu_deactivate");
+		CGamepadRemapUI::Instance().Close("main_menu_deactivate");
+
 		if (m_startDialog->IsShown())
 			m_startDialog->HideDialog();
 
@@ -301,6 +312,9 @@ bool CMainMenu::ReloadUI()
 {
 	if (m_startDialog)
 	{
+		CGamepadOnScreenKeyboardUI::Instance().CloseCancel("main_menu_reload_ui");
+		CGamepadCalibrationUI::Instance().Close("main_menu_reload_ui");
+		CGamepadRemapUI::Instance().Close("main_menu_reload_ui");
 		if (m_startDialog->IsShown())
 			m_startDialog->HideDialog();
 		CleanInternals();
@@ -368,6 +382,10 @@ void CMainMenu::IR_OnMouseStop(int x, int y)
 void CMainMenu::IR_OnKeyboardPress(int dik)
 {
 	if (!IsActive()) return;
+	if (GpHintXray::OnKey(dik)) // INV-REWORK-24: F8 hint x-ray (-dbg)
+		return;
+	if (CUIEditKeyBind::HandleGamepadEditKey(TopInputReceiver(), dik))
+		return;
 
 	switch (get_binded_action(dik))
 	{
@@ -491,10 +509,26 @@ void CMainMenu::OnRenderPPUI_PP()
 
 	UI().pp_start();
 
-	xr_vector<CUIWindow*>::iterator it = m_pp_draw_wnds.begin();
-	for (; it != m_pp_draw_wnds.end(); ++it)
+	const auto* receiver = TopInputReceiver();
+	const bool oskOpen = CGamepadOnScreenKeyboardUI::Instance().IsOpen();
+	for (auto* window : m_pp_draw_wnds)
 	{
-		(*it)->Draw();
+		bool behindDialog = oskOpen;
+		if (!behindDialog && m_startDialog && receiver && receiver != m_startDialog)
+		{
+			// The main-menu magnifier is drawn in this pass, after regular dialogs.
+			// Do not paint a background menu effect over the foreground dialog.
+			for (const CUIWindow* owner = window; owner && owner != receiver; owner = owner->GetParent())
+			{
+				if (owner == m_startDialog)
+				{
+					behindDialog = true;
+					break;
+				}
+			}
+		}
+		if (!behindDialog)
+			window->Draw();
 	}
 	UI().pp_stop();
 }
@@ -610,6 +644,7 @@ void CMainMenu::SetErrorDialog(EErrorDlg ErrDlg)
 void CMainMenu::CheckForErrorDlg()
 {
 	if (m_NeedErrDialog == ErrNoError) return;
+	CGamepadContextDispatcher::Instance().ConsumeAllCurrentlyHeldButtons();
 	GetErrorDialog(m_NeedErrDialog)->ShowDialog(false);
 	m_NeedErrDialog = ErrNoError;
 };

@@ -32,6 +32,11 @@ public:
 	{
 		lookat_active = false;
 	}
+
+	bool IsLookAtActive() const
+	{
+		return lookat_active;
+	}
 };
 
 #endif // __CAMERALOOK_H__

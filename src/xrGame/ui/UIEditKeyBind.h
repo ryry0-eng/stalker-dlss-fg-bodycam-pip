@@ -44,10 +44,20 @@ public:
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 
+	bool BeginGamepadEdit();
+	bool IsGamepadEditing() const;
+	void CancelGamepadEdit();
+	static CUIEditKeyBind* ActiveGamepadEdit(CUIWindow* receiver);
+	static bool HandleGamepadEditKey(CUIWindow* receiver, int dik);
+
 protected:
 	void BindAction2Key();
 
 	bool m_bIsEditMode;
+
+private:
+	bool BindInput(int dik);
+	static CUIEditKeyBind* s_gamepadEdit;
 
 
 	//.	CUIColorAnimatorWrapper*				m_pAnimation;

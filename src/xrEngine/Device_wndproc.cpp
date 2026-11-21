@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "MonitorList.h"
+#include "xr_input.h"
 
 bool CRenderDevice::on_message(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT& result)
 {
@@ -89,6 +90,20 @@ bool CRenderDevice::on_message(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 //-----------------------------------------------------------------------------
 LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	if (g_gp_in_sdl_update)
+	{
+		const u32 idx = g_gp_wndproc_in_sdl_count;
+		g_gp_wndproc_in_sdl_msgs[idx % GAMEPAD_WNDPROC_RING_SIZE] = uMsg;
+		g_gp_wndproc_in_sdl_count = idx + 1;
+		if (ps_gp_telemetry && pInput)
+		{
+			string128 line;
+			xr_sprintf(line, sizeof(line), "wndproc_in_sdl,%u,count=%u,uMsg=0x%04X",
+			           pInput->dwCurTime, idx + 1, uMsg);
+			pInput->WriteGamepadTelemetryLine(line);
+		}
+	}
+
 	LRESULT result;
 	if (Device.on_message(hWnd, uMsg, wParam, lParam, result))
 		return (result);

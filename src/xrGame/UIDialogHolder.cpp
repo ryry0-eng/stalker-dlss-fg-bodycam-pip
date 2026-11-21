@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "UIDialogHolder.h"
+#include "GpHintXray.h"
 #include "ui/UIDialogWnd.h"
+#include "ui/UIComboBox.h"
 #include "UIGameCustom.h"
 #include "UICursor.h"
 #include "level.h"
@@ -144,6 +146,8 @@ void CDialogHolder::AddDialogToRender(CUIWindow* pDialog)
 
 void CDialogHolder::RemoveDialogToRender(CUIWindow* pDialog)
 {
+	CUIComboBox::RemoveFromRenderTree(pDialog);
+
 	if (TopInputReceiver() == pDialog)
 		SetMainInputReceiver(NULL, false);
 
@@ -186,6 +190,7 @@ void CDialogHolder::DoRenderDialogs(CUIWindow* skip)
 		if ((*it).enabled && (*it).wnd && (*it).wnd->IsShown() && (*it).wnd != skip)
 			(*it).wnd->Draw();
 	}
+	GpHintXray::RenderDialogs(m_dialogsToRender); // INV-REWORK-24, F8 with -dbg
     m_b_in_render = false;
 }
 
@@ -204,6 +209,18 @@ CUIDialogWnd* CDialogHolder::TopInputReceiver()
 {
 	if (!m_input_receivers.empty())
 		return m_input_receivers.back().m_item;
+	return NULL;
+}
+
+CUIDialogWnd* CDialogHolder::PreviousInputReceiver(const CUIDialogWnd* ir) const
+{
+	if (!ir || m_input_receivers.size() < 2)
+		return NULL;
+	for (size_t i = m_input_receivers.size(); i-- > 1; )
+	{
+		if (m_input_receivers[i].m_item == ir)
+			return m_input_receivers[i - 1].m_item;
+	}
 	return NULL;
 };
 
@@ -301,7 +318,13 @@ void CDialogHolder::CleanInternals()
 	while (!m_input_receivers.empty())
 		m_input_receivers.pop_back();
 
+	for (auto& it : m_dialogsToRender)
+		CUIComboBox::RemoveFromRenderTree(it.wnd);
+	for (auto& it : m_dialogsToRender_new)
+		CUIComboBox::RemoveFromRenderTree(it.wnd);
+
 	m_dialogsToRender.clear();
+	m_dialogsToRender_new.clear();
 	GetUICursor().Hide();
 }
 

@@ -37,6 +37,7 @@ CHudItem::CHudItem()
 	m_bStopAtEndAnimIsRunning = false;
 	m_current_motion_def = NULL;
 	m_started_rnd_anim_idx = u8(-1);
+	m_gp_move_k = 1.f;
 
 	m_fLR_CameraFactor = 0.f;
 	m_fLR_MovingFactor = 0.f;
@@ -558,8 +559,67 @@ void CHudItem::UpdateNearWall()
 	}
 }
 
+// FIX-LIVE2 п.19 (Миша 2026-11-16, 19а): темп хода оружия следует за LS всё время клипа, а не только при его
+// запуске. Раньше скорость anm_idle_moving* бралась один раз в PlayHUDMotion: клип, начатый при слабом наклоне,
+// шёл медленно до конца (до 1/0.35 своей длины) и после полного наклона — «застревал», а потом прыгал.
+// Теперь при изменении g_gp_move_anim_k скорость живых blend рук и предмета умножается на k_new/k_old,
+// а оставшееся время до конца клипа делится на то же отношение — фаза сохраняется, без рывка.
+namespace
+{
+struct GpScaleBlends : public IterateBlendsCallback
+{
+	float ratio;
+	u16 part; // FIX-LIVE6: u16(-1) = все blend; иначе только своя часть рук (player_hud::anim_play: 2 = правая, 1 = левая)
+	explicit GpScaleBlends(float r, u16 p = u16(-1)) : ratio(r), part(p) {}
+	void operator()(CBlend& B) override
+	{
+		if (B.blend_state() != CBlend::eFREE_SLOT && (part == u16(-1) || B.bone_or_part == part))
+			B.speed *= ratio;
+	}
+};
+}
+
+void CHudItem::UpdateGamepadMoveTempo()
+{
+	extern float g_gp_move_anim_k;
+	// FIX-LIVE3 п.5: anm_idle_moving* — зацикленный клип; после первого прохода (m_dwMotionEndTm) движок
+	// снимает m_bStopAtEndAnimIsRunning и клип НЕ перезапускает — blend крутится дальше со скоростью старта.
+	// Раньше темп подстраивался только в первом проходе, потом руки шли в темпе момента начала ходьбы.
+	// Теперь условие — только имя текущего клипа (m_current_motion задаёт каждый PlayHUDMotion_noCB).
+	if (!m_current_motion.size() || !IsAttachedToHUD() || !g_player_hud)
+		return;
+	if (strstr(m_current_motion.c_str(), "anm_idle_moving") != m_current_motion.c_str())
+		return;
+	const float k_old = (m_gp_move_k > 0.01f) ? m_gp_move_k : 1.f;
+	const float k_new = _max(0.05f, g_gp_move_anim_k);
+	if (_abs(k_new - k_old) < 0.02f)
+		return;
+	const float ratio = k_new / k_old;
+	// FIX-LIVE6 (Миша 2026-11-16): два предмета в руках (детектор + болт) — каждый CHudItem раньше умножал blend
+	// ОБЕИХ рук: ratio применялся дважды, после замедления и разгона руки шли «супербыстро». Теперь при двух
+	// предметах каждый масштабирует только свою часть (та же схема part_id, что в player_hud::anim_play).
+	attachable_hud_item* hi = HudItemData();
+	u16 handPart = u16(-1);
+	if (hi && g_player_hud->attached_item(0) && g_player_hud->attached_item(1))
+		handPart = (hi->m_attach_place_idx == 0) ? 2 : 1;
+	GpScaleBlends scale(ratio, handPart);
+	if (g_player_hud->m_model)
+		g_player_hud->m_model->LL_IterateBlends(scale);
+	if (g_player_hud->m_model_2)
+		g_player_hud->m_model_2->LL_IterateBlends(scale);
+	GpScaleBlends scaleOwn(ratio);
+	if (hi && hi->m_model)
+		if (IKinematicsAnimated* ka = hi->m_model->dcast_PKinematicsAnimated())
+			ka->LL_IterateBlends(scaleOwn);
+	const u32 now = Device.dwTimeGlobal;
+	if (m_bStopAtEndAnimIsRunning && m_dwMotionEndTm > now)
+		m_dwMotionEndTm = now + iFloor(float(m_dwMotionEndTm - now) / ratio + 0.5f);
+	m_gp_move_k = k_new;
+}
+
 void CHudItem::UpdateCL()
 {
+	UpdateGamepadMoveTempo();
 	if (m_current_motion_def)
 	{
 		if (m_bStopAtEndAnimIsRunning)
@@ -741,6 +801,14 @@ extern float g_end_modif;
 u32 CHudItem::PlayHUDMotion(shared_str M, BOOL bMixIn, CHudItem* W, u32 state, float speed, float end, bool bMixIn2)
 {
     const shared_str requestedMotion=M;
+	// FIX-LIVE1 p.1: scale anm_idle_moving* speed by left-stick tilt
+	{
+		extern float g_gp_move_anim_k;
+		const bool moving_clip = M.size() && strstr(M.c_str(), "anm_idle_moving") == M.c_str();
+		if (g_gp_move_anim_k < 1.f && moving_clip)
+			speed *= g_gp_move_anim_k;
+		m_gp_move_k = (moving_clip && g_gp_move_anim_k < 1.f) ? g_gp_move_anim_k : 1.f;
+	}
 	if (IsAttachedToHUD())
 	{
 		::luabind::functor<::luabind::object> funct;

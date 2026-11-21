@@ -17,6 +17,8 @@
 #include "breakableobject.h"
 #include "GamePersistent.h"
 #include "../../script_game_object.h"
+#include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
 
 #define WIND_RADIUS (4*Radius())	//расстояние до актера, когда появляется ветер 
 #define FASTMODE_DISTANCE (100.f)	//distance to camera from sphere, when zone switches to fast update sequence
@@ -729,6 +731,15 @@ void CCustomZone::feel_touch_new(CObject* O)
 	{
 		PlayEntranceParticles(pGameObject);
 		PlayObjectIdleParticles(pGameObject);
+
+		// D5.2: импульс входа локального актора в активную аномалию
+		// FIX-LIVE2 п.17: радиационный очаг на вход не толкает — только рост дозы (CActor::UpdateGamepadRadiationHaptic)
+		if (!object_info.zone_ignore && O == Level().CurrentControlEntity() && smart_cast<CActor*>(O) &&
+		    m_eHitTypeBlowout != ALife::eHitTypeRadiation &&
+		    pInput && pInput->GetGamepadHaptics())
+		{
+			pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Anomaly, 0.70f, 0, "CustomZone::feel_touch_new");
+		}
 	}
 };
 
@@ -1442,6 +1453,24 @@ void CCustomZone::CreateHit(u16 id_to,
 		Hit.weaponID = this->ID();
 		Hit.Write_Packet(l_P);
 		u_EventSend(l_P);
+
+		// D5.2: импульс срабатывания/удара аномалии по локальному актору
+		// FIX-LIVE2 п.17 (Миша 2026-11-16, 17а): радиационный удар сам не вибрирует — запоминается время и сила,
+		// а толчок (вполсилы) даёт CActor::UpdateGamepadRadiationHaptic, только если доза после защиты выросла.
+		if (hit_type == ALife::eHitTypeRadiation && Level().CurrentControlEntity() &&
+		    id_to == Level().CurrentControlEntity()->ID())
+		{
+			extern u32 g_gp_rad_zone_hit_ms;
+			extern float g_gp_rad_zone_hit_power;
+			g_gp_rad_zone_hit_ms = Device.dwTimeGlobal;
+			g_gp_rad_zone_hit_power = hit_power;
+		}
+		else if (Level().CurrentControlEntity() && id_to == Level().CurrentControlEntity()->ID() &&
+		    hit_power > 0.005f && pInput && pInput->GetGamepadHaptics())
+		{
+			const float anomScale = std::clamp(0.50f + hit_power, 0.50f, 1.30f);
+			pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Anomaly, anomScale, 0, "CustomZone::CreateHit");
+		}
 	};
 }
 

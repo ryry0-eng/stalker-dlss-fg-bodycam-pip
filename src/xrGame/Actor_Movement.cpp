@@ -17,6 +17,12 @@
 #include "static_cast_checked.hpp"
 #include "player_hud.h"
 #include "bodycam_settings.h"
+#include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadMath.h"
+#include "../xrEngine/GamepadErrorGuard.h"
+#include "../xrEngine/XR_IOConsole.h"
+#include "UI/UIDialogWnd.h"
+#include "GamepadContextDispatcher.h"
 
 #ifdef DEBUG
 #include "phdebug.h"
@@ -25,6 +31,290 @@ BOOL disableActorBodyRotationDelay = TRUE;
 
 // verdatim: flag to allow 'running' speed during left or right lookouts
 BOOL AllowAccelDuringLookOut = FALSE; 
+
+// C2.1 + D2.2: конвейер мёртвой зоны, насыщения и кривой из профиля калибровки (GamepadMath)
+constexpr float GAMEPAD_MOVE_FLAG_THRESHOLD = 0.30f;
+constexpr float GAMEPAD_SPRINT_BACK_K = 0.35f; // FIX-LIVE2 п.14: бег снимает стик назад, угол > ~110° от «вперёд»
+constexpr float GAMEPAD_STUCK_VEL_BASE = 0.2f;
+
+extern bool g_bDisableAllInput;
+bool g_gp_synth_move_active = false;
+// FIX-LIVE1 п.1: множитель скорости анимации �
+// Читают: ноги/шаги (ActorAnimation.cpp), покачивание камеры (EffectorBobbing.cpp), слои движения рук (player_hud.cpp).
+float g_gp_move_anim_k = 1.f;
+// FIX-LIVE3 п.5: скорость �
+// нижняя граница 0.35 давала у слабого наклона почти обычный темп при едва ползущем персонаже.
+constexpr float GAMEPAD_MOVE_ANIM_MIN_K = 0.15f;
+// FIX-LIVE3 п.7: окно, в которое отпущенный на бегу стик может вернуться и продолжить бег (переброс через центр)
+constexpr u32 GAMEPAD_SPRINT_PENDING_MS = 200;
+// FIX-LIVE4: бег держится, пока наклон LS не ослаблен; ниже порога дольше 150 мс — бег снят.
+// FIX-LIVE5 (Миша 2026-11-16): порог — по ФИЗИЧЕСКОМУ наклону стика (до мёртвой зоны и кривой): отпустил
+// примерно на 30% от полного — персонаж пере�
+// соответствовали ~0.65-0.75 и зависели от калибровки, поэтому бег лишь замедлялся.
+constexpr float GAMEPAD_SPRINT_KEEP_MAG = 0.7f;
+constexpr u32 GAMEPAD_SPRINT_LOW_MS = 150;
+float g_gp_synth_move_x = 0.f;
+float g_gp_synth_move_y = 0.f;
+
+void CActor::UpdateGamepadMoveInput()
+{
+	m_vGamepadMove.set(0.f, 0.f);
+	m_fGamepadMoveRawMag = 0.f;
+
+	u32 sehCode = 0;
+	u64 sehAddr = 0;
+	const bool stepOk = gperr::ExecuteProtectedGamepadStepSEH(
+	    +[](void* rawSelf)
+	    {
+		    CActor* self = static_cast<CActor*>(rawSelf);
+		    if (!self)
+			    return;
+
+		    CGamepadContextDispatcher::Instance().OnFrame();
+		    if ((Console && Console->bVisible) || !CGamepadContextDispatcher::Instance().AllowsWorldMove())
+		    {
+			    if (self->m_bGamepadMoveActive)
+			    {
+				    self->m_bGamepadMoveActive = false;
+				    self->StopAnyMove();
+			    }
+			    return;
+		    }
+
+		    if (Device.Paused() || g_bDisableAllInput || !self->g_Alive() || self->Remote() || self->IsTalking() || self->m_holder != nullptr)
+			    return;
+
+		    if (CurrentGameUI())
+		    {
+			    CUIDialogWnd* pTIR = CurrentGameUI()->TopInputReceiver();
+			    if (pTIR && pTIR->IR_process() && pTIR->StopAnyMove())
+				    return;
+		    }
+
+		    if (g_gp_synth_move_active)
+		    {
+			    Fvector2 synth = { g_gp_synth_move_x, g_gp_synth_move_y };
+			    const float mag = synth.magnitude();
+			    if (mag > 1.f)
+				    synth.mul(1.f / mag);
+			    if (mag > EPS_S)
+			    {
+				    self->m_vGamepadMove = synth;
+				    self->m_fGamepadMoveRawMag = _min(mag, 1.f);
+			    }
+			    return;
+		    }
+
+		    if (!pInput)
+			    return;
+
+		    const CInput::sxr_gamepad_state& gp = pInput->GetGamepadState();
+		    if (!gp.connected || !gp.has_focus)
+			    return;
+
+		    const float rawX = gpmath::NormalizeStickAxis(gp.axes[0]);
+		    const float rawY = -gpmath::NormalizeStickAxis(gp.axes[1]);
+		    const gpmath::Vec2 mv = gpmath::ProcessStick(gpmath::GetCalibrationProfile().left_stick, rawX, rawY);
+		    if (_abs(mv.x) <= EPS_S && _abs(mv.y) <= EPS_S)
+			    return;
+
+		    self->m_vGamepadMove.set(mv.x, mv.y);
+		    self->m_fGamepadMoveRawMag = _min(_sqrt(rawX * rawX + rawY * rawY), 1.f);
+	    },
+	    this,
+	    sehCode,
+	    sehAddr);
+
+	if (!stepOk)
+	{
+		g_gp_synth_move_active = false;
+		m_vGamepadMove.set(0.f, 0.f);
+		CGamepadContextDispatcher::Instance().ConsumeAllCurrentlyHeldButtons();
+		const LPCSTR ctxName = CGamepadContextDispatcher::GetContextName(CGamepadContextDispatcher::Instance().GetCurrentContext());
+		if (pInput)
+		{
+			pInput->HandleGamepadFrameError("CActor::UpdateGamepadMoveInput", nullptr, sehCode, sehAddr, ctxName);
+		}
+		else
+		{
+			gperr::HandleProtectedFrameFailure("CActor::UpdateGamepadMoveInput", nullptr, sehCode, sehAddr);
+		}
+	}
+}
+
+bool CActor::EvaluateGamepadSprintCone(float gx, float gy, float gpMag, float& outVx, float& outVz)
+{
+	// FIX-LIVE2 п.14 + п.22 (Миша 2026-11-16): бег снимает только стик назад (угол больше ~110° от «вперёд»,
+	// gy < -0.35 * |LS|); вперёд, по диагонали и строго вбок бег держится, боковая составляющая не урезается
+	// (вбок с той же скоростью, что вперёд: f_strafe = 1 в расчёте скорости ниже).
+	// Было (E1.1, D42): конус ±60° и боковая составляющая * 0.5.
+	if (gpMag <= EPS_S || gy < -GAMEPAD_SPRINT_BACK_K * gpMag)
+	{
+		outVx = gx;
+		outVz = gy;
+		return false;
+	}
+	outVx = gx;
+	outVz = gy;
+	return true;
+}
+
+void CActor::EvaluateGamepadLadderStick(float gx, float gy, float& outVx, float& outVz, u32& inOutGpFlags)
+{
+	// E1.1 (4, 5): на лестнице (mcClimb) при отклонении стика преимущественно ввер�
+	// обнуляем случайный боковой дрейф пальца, чтобы CElevatorState::UpdateStClimbing* не сбрасывал в clbDepart;
+	// при намеренном отклонении стика вбок (|gx| > |gy|) со�
+	if (_abs(gy) >= _abs(gx))
+	{
+		outVx = 0.f;
+		outVz = gy;
+		inOutGpFlags &= ~(mcLStrafe | mcRStrafe);
+		inOutGpFlags |= (gy >= 0.f) ? mcFwd : mcBack;
+	}
+	else
+	{
+		outVx = gx;
+		outVz = gy;
+	}
+}
+
+void CActor::StepGamepadPostureState(bool isHoldAction,
+                                     bool isSprintAction,
+                                     bool& inOutCrouch,
+                                     bool& inOutLowCrouch,
+                                     bool& inOutSprint,
+                                     u32& inOutWishful)
+{
+	if (isSprintAction)
+	{
+		// L3 (D16): Toggle спринта; если были в приседе / низком приседе — встаём и включаем спринт.
+		// E1.2b: решение принимается только по флагам геймпада (+ mstate_real, см. обёртки Set*), НЕ по mstate_wishful:
+		// диспетчер перед вызовом инъецирует kSPRINT_TOGGLE, и при g_sprint_toggle=on движок уже сам переключил
+		// mcSprint в mstate_wishful — повторный toggle по этому биту сразу выключал бы только что включённый спринт.
+		if (inOutSprint)
+		{
+			inOutSprint = false;
+			inOutWishful &= ~mcSprint;
+		}
+		else
+		{
+			inOutCrouch = false;
+			inOutLowCrouch = false;
+			inOutSprint = true;
+			inOutWishful &= ~(mcCrouch | mcAccel);
+			inOutWishful |= mcSprint;
+		}
+		return;
+	}
+
+	if (!isHoldAction)
+	{
+		// Короткое нажатие B (Tap < 300 мс): Toggle приседа (стоя -> присед Box 1; присед или низкий присед -> встать Box 0).
+		// E1.2b: решение — только по флагам геймпада (+ mstate_real, см. обёртки Set*), НЕ по mstate_wishful.
+		// Диспетчер перед вызовом инъецирует kCROUCH (press+release), и при g_crouch_toggle=on движок уже сам сделал
+		// mstate_wishful ^= mcCrouch (ActorInput.cpp, case kCROUCH). Раньше этот бит читался как «уже в приседе»
+		// и короткое B тут же выключало присед (персонаж оставался стоять). Явная запись wishful ниже
+		// переопределяет результат инъекции в обе стороны.
+		if (inOutCrouch || inOutLowCrouch)
+		{
+			inOutCrouch = false;
+			inOutLowCrouch = false;
+			inOutWishful &= ~(mcCrouch | mcAccel);
+		}
+		else
+		{
+			inOutCrouch = true;
+			inOutLowCrouch = false;
+			inOutSprint = false;
+			inOutWishful &= ~(mcSprint | mcAccel);
+			inOutWishful |= mcCrouch;
+		}
+	}
+	else
+	{
+		// Удержание B (Hold >= 300 мс): стоя или в обычном приседе -> низкий присед Box 2 (mcCrouch | mcAccel);
+		// повторное удержание B из низкого приседа -> подъём в обычный присед Box 1 (mcCrouch без mcAccel)
+		if (inOutLowCrouch || ((inOutWishful & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel)))
+		{
+			inOutCrouch = true;
+			inOutLowCrouch = false;
+			inOutWishful &= ~mcAccel;
+			inOutWishful |= mcCrouch;
+		}
+		else
+		{
+			inOutCrouch = true;
+			inOutLowCrouch = true;
+			inOutSprint = false;
+			inOutWishful &= ~mcSprint;
+			inOutWishful |= (mcCrouch | mcAccel);
+		}
+	}
+}
+
+void CActor::SetGamepadSprintToggle()
+{
+	// FIX-LIVE2 п.14: повторное нажатие LS при отпущенном стике снимает со�
+	if (m_bGamepadSprintPending && !m_bGamepadSprint)
+	{
+		m_bGamepadSprintPending = false;
+		mstate_wishful &= ~mcSprint;
+		return;
+	}
+	m_bGamepadSprintPending = false;
+	m_bGamepadCrouch = m_bGamepadCrouch || ((mstate_real & mcCrouch) != 0);
+	m_bGamepadLowCrouch = m_bGamepadLowCrouch || ((mstate_real & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel));
+	m_bGamepadSprint = m_bGamepadSprint || ((mstate_real & mcSprint) != 0);
+	StepGamepadPostureState(false, true, m_bGamepadCrouch, m_bGamepadLowCrouch, m_bGamepadSprint, mstate_wishful);
+}
+
+void CActor::SetGamepadCrouchToggle()
+{
+	m_bGamepadCrouch = m_bGamepadCrouch || ((mstate_real & mcCrouch) != 0);
+	m_bGamepadLowCrouch = m_bGamepadLowCrouch || ((mstate_real & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel));
+	m_bGamepadSprint = m_bGamepadSprint || ((mstate_real & mcSprint) != 0);
+	StepGamepadPostureState(false, false, m_bGamepadCrouch, m_bGamepadLowCrouch, m_bGamepadSprint, mstate_wishful);
+}
+
+void CActor::SetGamepadLowCrouchHold()
+{
+	m_bGamepadCrouch = m_bGamepadCrouch || ((mstate_real & mcCrouch) != 0);
+	m_bGamepadLowCrouch = m_bGamepadLowCrouch || ((mstate_real & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel));
+	m_bGamepadSprint = m_bGamepadSprint || ((mstate_real & mcSprint) != 0);
+	StepGamepadPostureState(true, false, m_bGamepadCrouch, m_bGamepadLowCrouch, m_bGamepadSprint, mstate_wishful);
+}
+
+void CActor::ApplyGamepadPostureToWishful()
+{
+	if (m_bGamepadCrouch)
+	{
+		mstate_wishful |= mcCrouch;
+		if (m_bGamepadLowCrouch)
+			mstate_wishful |= mcAccel;
+		else
+			mstate_wishful &= ~mcAccel;
+	}
+	else
+	{
+		mstate_wishful &= ~mcCrouch;
+		if (!m_bGamepadLowCrouch)
+			mstate_wishful &= ~mcAccel;
+	}
+
+	if (m_bGamepadSprint)
+		mstate_wishful |= mcSprint;
+	else
+		mstate_wishful &= ~mcSprint;
+}
+
+void CActor::ResetGamepadMovementLatches()
+{
+	m_bGamepadSprint = false;
+	m_bGamepadSprintPending = false;
+	m_bGamepadCrouch = false;
+	m_bGamepadLowCrouch = false;
+}
+
 static const float s_fLandingTime1 = 0.1f; // через сколько снять флаг Landing1 (т.е. включить следующую анимацию)
 static const float s_fLandingTime2 = 0.3f; // через сколько снять флаг Landing2 (т.е. включить следующую анимацию)
 static const float s_fJumpTime = 0.3f;
@@ -102,7 +392,10 @@ void CActor::g_cl_ValidateMState(float dt, u32 mstate_wf)
 		m_bJumpKeyPressed = FALSE;
 
 	// Зажало-ли меня/уперся - не двигаюсь
-	if (((character_physics_support()->movement()->GetVelocityActual() < 0.2f) && (!(mstate_real & (mcFall | mcJump | mcLanding | mcLanding2)) || (!(mstate_real & mcClimb) && character_physics_support()->movement()->Environment() == CPHMovementControl::peAtWall)))
+	const float stuckVelThreshold = m_bGamepadMoveActive
+		? GAMEPAD_STUCK_VEL_BASE * clampr(m_vGamepadMove.magnitude(), 0.f, 1.f) // C2.1 fix: порог пропорционален |v| (скорость тоже ~|v|); полный стик = клавиатура 0.2
+		: GAMEPAD_STUCK_VEL_BASE;
+	if (((character_physics_support()->movement()->GetVelocityActual() < stuckVelThreshold) && (!(mstate_real & (mcFall | mcJump | mcLanding | mcLanding2)) || (!(mstate_real & mcClimb) && character_physics_support()->movement()->Environment() == CPHMovementControl::peAtWall)))
 		|| character_physics_support()->movement()->bSleep)
 	{
 		mstate_real &= ~ mcAnyMove;
@@ -123,6 +416,9 @@ void CActor::g_cl_ValidateMState(float dt, u32 mstate_wf)
 		{
 			mstate_real |= mcClimb;
 			mstate_real &= ~mcSprint;
+			m_bGamepadSprint = false;
+			m_bGamepadCrouch = false;
+			m_bGamepadLowCrouch = false;
 			cam_SetLadder();
 		}
 	}
@@ -146,7 +442,7 @@ void CActor::g_cl_ValidateMState(float dt, u32 mstate_wf)
 		}
 	}
 
-	if (!CanAccelerate() && isActorAccelerated(mstate_real, IsZoomAimingMode()))
+	if (!CanAccelerate() && isActorAccelerated(mstate_real, IsZoomAimingMode()) && !(mstate_real & mcCrouch) && !m_bGamepadMoveActive)
 	{
 		mstate_real ^= mcAccel;
 	};
@@ -184,19 +480,36 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 
 	if (!CanMove())
 	{
-		if (mstate_wf & mcAnyMove)
+		if ((mstate_wf & mcAnyMove) || (mstate_real & mcAnyMove) || m_bGamepadSprint)
 		{
 			StopAnyMove();
 			mstate_wf &= ~mcAnyMove;
 			mstate_wf &= ~mcJump;
+			mstate_wf &= ~mcSprint;
 		}
 	}
 	if (bodycam_reference) BodycamReferenceGait(mstate_wf);
-	// update player accel
-	if (mstate_wf & mcFwd) vControlAccel.z += 1;
-	if (mstate_wf & mcBack) vControlAccel.z += -1;
-	if (mstate_wf & mcLStrafe) !bodycam_reference && (mstate_wf & mcSprint) ? vControlAccel.x += -0.5 : vControlAccel.x += -1;
-	if (mstate_wf & mcRStrafe) !bodycam_reference && (mstate_wf & mcSprint) ? vControlAccel.x += 0.5 : vControlAccel.x += 1;
+
+	const bool bKbMove = (mstate_wf & mcAnyMove) != 0;
+	const float gpMagSq = m_vGamepadMove.square_magnitude();
+	const bool bGpMove = !bKbMove && CanMove() && (gpMagSq > EPS_S);
+	m_bGamepadMoveActive = bGpMove;
+	g_gp_move_anim_k = bGpMove ? _max(GAMEPAD_MOVE_ANIM_MIN_K, clampr(_sqrt(gpMagSq), 0.f, 1.f)) : 1.f;
+
+	// E1.1 (2): медленный шаг стиком никогда не ставит mcAccel и не включает ActivateBoxDynamic(2) сам.
+	if ((bGpMove || m_bGamepadCrouch) && !m_bGamepadLowCrouch)
+	{
+		mstate_wf &= ~mcAccel;
+		mstate_wishful &= ~mcAccel;
+	}
+	else
+	{
+		// update player accel
+		if (mstate_wf & mcFwd) vControlAccel.z += 1;
+		if (mstate_wf & mcBack) vControlAccel.z += -1;
+		if (mstate_wf & mcLStrafe) !bodycam_reference && (mstate_wf & mcSprint) ? vControlAccel.x += -0.5 : vControlAccel.x += -1;
+		if (mstate_wf & mcRStrafe) !bodycam_reference && (mstate_wf & mcSprint) ? vControlAccel.x += 0.5 : vControlAccel.x += 1;
+	}
 
 	CPHMovementControl::EEnvironment curr_env = character_physics_support()->movement()->Environment();
 	if (curr_env == CPHMovementControl::peOnGround || curr_env == CPHMovementControl::peAtWall)
@@ -207,6 +520,8 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 			if (mstate_real & mcClimb)
 			{
 				mstate_wf &= ~mcCrouch;
+				m_bGamepadCrouch = false;
+				m_bGamepadLowCrouch = false;
 			}
 			else
 			{
@@ -261,7 +576,14 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 		}
 
 		if ((mstate_wf & mcSprint) && !CanSprint())
+		{
 			mstate_wf &= ~mcSprint;
+			if (!((mstate_real & mcCrouch) && !(mstate_wf & mcCrouch)))
+			{
+				mstate_wishful &= ~mcSprint;
+				m_bGamepadSprint = false;
+			}
+		}
 
 		mstate_real &= (~move);
 		mstate_real |= (mstate_wf & move);
@@ -270,12 +592,17 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 			mstate_real |= mcSprint;
 		else
 			mstate_real &= ~mcSprint;
-		if ((bodycam_reference ? !BodycamReferenceSprintDirection() : !(mstate_real & mcFwd)) || mstate_real & (mcCrouch | mcClimb) || !isActorAccelerated(
+		const bool bGpSprintDir = bGpMove && m_bGamepadSprint && (mstate_real & (mcFwd | mcLStrafe | mcRStrafe)) &&
+		                          !(mstate_real & mcBack);
+		if ((bodycam_reference ? !BodycamReferenceSprintDirection() : (!(mstate_real & mcFwd) && !bGpSprintDir)) || mstate_real & (mcCrouch | mcClimb) || !isActorAccelerated(
 			mstate_wf, IsZoomAimingMode()))
 		{
 			mstate_real &= ~mcSprint;
 			if (!(mstate_real & (mcCrouch) && !(mstate_wf & mcCrouch)))
+			{
 				mstate_wishful &= ~mcSprint;
+				m_bGamepadSprint = false;
+			}
 		}
 
 		if (bodycam_reference) BodycamReferenceFallbackGait();
@@ -293,33 +620,84 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 			float scale = vControlAccel.magnitude();
 			if (scale > EPS)
 			{
-				scale = m_fWalkAccel / scale;
-				if (bAccelerated && !IsZoomAimingMode())
-					if (mstate_real & mcBack)
-						scale *= m_fRunBackFactor;
-					else
-						scale *= m_fRunFactor;
-				else if (mstate_real & mcBack)
-					scale *= m_fWalkBackFactor;
-
-
-				if (mstate_real & mcCrouch) scale *= m_fCrouchFactor;
-				if (mstate_real & mcClimb) scale *= m_fClimbFactor;
-				if (mstate_real & mcSprint) scale *= m_fSprintFactor;
-
-				if (mstate_real & (mcLStrafe | mcRStrafe) && !(mstate_real & mcCrouch))
+				if (bGpMove)
 				{
-					if (mstate_real & mcSprint)
-						scale *= m_fSprint_StrafeFactor;
-					else if (bAccelerated)
-						scale *= m_fRun_StrafeFactor;
-					else
-						scale *= m_fWalk_StrafeFactor;
-				}
+					const float gpMag = clampr(_sqrt(gpMagSq), 0.f, 1.f);
+					vControlAccel.mul(1.f / scale);
 
-				if (bodycam_reference) scale = BodycamReferenceMoveScale(scale, vControlAccel, !!bAccelerated);
-				vControlAccel.mul(scale);
-				cam_eff_factor = scale;
+					const float cosTheta = vControlAccel.z;
+					const float sinTheta = vControlAccel.x;
+					const float cos2 = cosTheta * cosTheta;
+					const float sin2 = sinTheta * sinTheta;
+
+					const bool bRunScale = bAccelerated && !IsZoomAimingMode() && (m_fRunFactor > EPS);
+					float f_fb = 1.f;
+					if (cosTheta < 0.f)
+					{
+						if (bRunScale)
+							f_fb = m_fRunBackFactor / m_fRunFactor;
+						else if (bAccelerated && !IsZoomAimingMode())
+							f_fb = m_fRunBackFactor;
+						else
+							f_fb = m_fWalkBackFactor;
+					}
+
+					float f_strafe = 1.f;
+					if (!(mstate_real & mcCrouch))
+					{
+						if (mstate_real & mcSprint)
+							f_strafe = m_bGamepadSprint ? 1.f : m_fSprint_StrafeFactor;
+						else if (bAccelerated)
+							f_strafe = m_fRun_StrafeFactor;
+						else
+							f_strafe = m_fWalk_StrafeFactor;
+					}
+
+					const float dirFactor = cos2 * f_fb + sin2 * f_strafe;
+
+					scale = m_fWalkAccel;
+					if (bRunScale)
+						scale *= m_fRunFactor;
+
+					if (mstate_real & mcCrouch) scale *= m_fCrouchFactor;
+					if (mstate_real & mcClimb) scale *= m_fClimbFactor;
+					if (mstate_real & mcSprint) scale *= m_fSprintFactor;
+
+					scale *= dirFactor * gpMag;
+					if (bodycam_reference) scale = BodycamReferenceMoveScale(scale, vControlAccel, !!bAccelerated);
+					vControlAccel.mul(scale);
+					cam_eff_factor = scale;
+				}
+				else
+				{
+					scale = m_fWalkAccel / scale;
+					if (bAccelerated && !IsZoomAimingMode())
+						if (mstate_real & mcBack)
+							scale *= m_fRunBackFactor;
+						else
+							scale *= m_fRunFactor;
+					else if (mstate_real & mcBack)
+						scale *= m_fWalkBackFactor;
+
+
+					if (mstate_real & mcCrouch) scale *= m_fCrouchFactor;
+					if (mstate_real & mcClimb) scale *= m_fClimbFactor;
+					if (mstate_real & mcSprint) scale *= m_fSprintFactor;
+
+					if (mstate_real & (mcLStrafe | mcRStrafe) && !(mstate_real & mcCrouch))
+					{
+						if (mstate_real & mcSprint)
+							scale *= m_fSprint_StrafeFactor;
+						else if (bAccelerated)
+							scale *= m_fRun_StrafeFactor;
+						else
+							scale *= m_fWalk_StrafeFactor;
+					}
+
+					if (bodycam_reference) scale = BodycamReferenceMoveScale(scale, vControlAccel, !!bAccelerated);
+					vControlAccel.mul(scale);
+					cam_eff_factor = scale;
+				}
 			} //scale>EPS
 		} //(mstate_real&mcAnyMove)
 	} //peOnGround || peAtWall
@@ -405,27 +783,40 @@ void CActor::g_Orientate(u32 mstate_rl, float dt)
 	{
 		if (g_LadderOrient()) return;
 	}
-	switch (mstate_rl & mcAnyMove)
+	if (m_bGamepadMoveActive && (mstate_rl & mcAnyMove))
 	{
-	case mcFwd + mcLStrafe:
-		calc_yaw = +fwd_l_strafe_yaw; //+PI_DIV_4; 
-		break;
-	case mcBack + mcRStrafe:
-		calc_yaw = +back_r_strafe_yaw; //+PI_DIV_4; 
-		break;
-	case mcFwd + mcRStrafe:
-		calc_yaw = -fwd_r_strafe_yaw; //-PI_DIV_4; 
-		break;
-	case mcBack + mcLStrafe:
-		calc_yaw = -back_l_strafe_yaw; //-PI_DIV_4; 
-		break;
-	case mcLStrafe:
-		calc_yaw = +l_strafe_yaw; //+PI_DIV_3-EPS_L; 
-		break;
-	case mcRStrafe:
-		calc_yaw = -r_strafe_yaw; //-PI_DIV_4+EPS_L; 
-		break;
+		const float gx = m_vGamepadMove.x;
+		const float gy = m_vGamepadMove.y;
+		if (gy >= 0.f)
+			calc_yaw = -atan2f(gx, gy);
+		else
+			calc_yaw = -atan2f(-gx, -gy);
 	}
+	else
+	{
+		switch (mstate_rl & mcAnyMove)
+		{
+		case mcFwd + mcLStrafe:
+			calc_yaw = +fwd_l_strafe_yaw; //+PI_DIV_4; 
+			break;
+		case mcBack + mcRStrafe:
+			calc_yaw = +back_r_strafe_yaw; //+PI_DIV_4; 
+			break;
+		case mcFwd + mcRStrafe:
+			calc_yaw = -fwd_r_strafe_yaw; //-PI_DIV_4; 
+			break;
+		case mcBack + mcLStrafe:
+			calc_yaw = -back_l_strafe_yaw; //-PI_DIV_4; 
+			break;
+		case mcLStrafe:
+			calc_yaw = +l_strafe_yaw; //+PI_DIV_3-EPS_L; 
+			break;
+		case mcRStrafe:
+			calc_yaw = -r_strafe_yaw; //-PI_DIV_4+EPS_L; 
+			break;
+		}
+	}
+	m_fGamepadLastCalcYaw = calc_yaw;
 
 	// lerp angle for "effect" and capture torso data from camera
 	float scale_yaw_offset = 1.0f;
@@ -643,7 +1034,8 @@ bool CActor::CanSprint()
 		/*&& !(mstate_real&mcLStrafe || mstate_real&mcRStrafe)*/
 		&& InventoryAllowSprint();
 
-	if (!Bodycam::ReferenceMovementActive() && (mstate_real & mcLStrafe || mstate_real & mcRStrafe) && !(mstate_real & mcFwd))
+	if (!Bodycam::ReferenceMovementActive() && (mstate_real & mcLStrafe || mstate_real & mcRStrafe) && !(mstate_real & mcFwd) &&
+	    !(m_bGamepadMoveActive && m_bGamepadSprint))
 		can_Sprint = false;
 
 	return can_Sprint && (m_block_sprint_counter <= 0);
@@ -661,9 +1053,10 @@ bool CActor::CanJump()
 
 bool CActor::CanMove()
 {
+	const bool bTryingToMove = ((mstate_wishful & mcAnyMove) != 0) || (m_vGamepadMove.square_magnitude() > EPS_S);
 	if (conditions().IsCantWalk())
 	{
-		if (mstate_wishful & mcAnyMove)
+		if (bTryingToMove && CurrentGameUI())
 		{
 			CurrentGameUI()->AddCustomStatic("cant_walk", true);
 		}
@@ -671,7 +1064,7 @@ bool CActor::CanMove()
 	}
 	else if (conditions().IsCantWalkWeight())
 	{
-		if (mstate_wishful & mcAnyMove)
+		if (bTryingToMove && CurrentGameUI())
 		{
 			CurrentGameUI()->AddCustomStatic("cant_walk_weight", true);
 		}
@@ -688,6 +1081,9 @@ void CActor::StopAnyMove()
 {
 	mstate_wishful &= ~mcAnyMove;
 	mstate_real &= ~mcAnyMove;
+	m_vGamepadMove.set(0.f, 0.f);
+	m_bGamepadMoveActive = false;
+	m_bGamepadSprint = false;
 
 	if (this == Level().CurrentViewEntity())
 	{

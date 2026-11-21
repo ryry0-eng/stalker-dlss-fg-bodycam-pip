@@ -5,6 +5,9 @@
 #include "../xr_level_controller.h"
 #include "object_broker.h"
 #include "../../xrEngine/xr_ioconsole.h"
+#include "../../xrEngine/xr_input.h"
+
+CUIEditKeyBind* CUIEditKeyBind::s_gamepadEdit = nullptr;
 
 CUIEditKeyBind::CUIEditKeyBind(bool bPrim)
 {
@@ -18,6 +21,8 @@ CUIEditKeyBind::CUIEditKeyBind(bool bPrim)
 
 CUIEditKeyBind::~CUIEditKeyBind()
 {
+	if (s_gamepadEdit == this)
+		s_gamepadEdit = nullptr;
 }
 
 u32 cut_string_by_length(CGameFont* pFont, LPCSTR src, LPSTR dst, u32 dst_size, float length)
@@ -90,28 +95,18 @@ void CUIEditKeyBind::Draw()
 void CUIEditKeyBind::OnFocusLost()
 {
 	inherited::OnFocusLost();
+	if (IsGamepadEditing())
+		return;
 	SetEditMode(false);
 	m_text->SetTextColor(subst_alpha(m_text->GetTextColor(), color_get_A(0xffffffff)));
 }
 
 bool CUIEditKeyBind::OnMouseDown(int mouse_btn)
 {
+	if (IsGamepadEditing())
+		return true; // Wait for a keyboard key, including when the virtual pointer overlaps this cell.
 	if (m_bIsEditMode)
-	{
-		string64 message;
-
-		m_keyboard = dik_to_ptr(mouse_btn, true);
-		if (!m_keyboard) return true;
-		SetValue();
-		OnFocusLost();
-
-		xr_strcpy(message, m_action->action_name);
-		xr_strcat(message, "=");
-		xr_strcat(message, m_keyboard->key_name);
-		SendMessage2Group("key_binding", message);
-
-		return true;
-	}
+		return BindInput(mouse_btn);
 
 	if (mouse_btn == MOUSE_1)
 		SetEditMode(m_bCursorOverWindow);
@@ -127,22 +122,85 @@ bool CUIEditKeyBind::OnKeyboardAction(int dik, EUIMessages keyboard_action)
 	if (inherited::OnKeyboardAction(dik, keyboard_action))
 		return true;
 
-	string64 message;
-	if (m_bIsEditMode)
+	if (IsGamepadEditing())
+		return true; // MainMenu handles the physical press before the generic UI route.
+	return m_bIsEditMode && keyboard_action == WINDOW_KEY_PRESSED && BindInput(dik);
+}
+
+bool CUIEditKeyBind::BindInput(int dik)
+{
+	auto* keyboard = dik_to_ptr(dik, true);
+	if (!keyboard)
+		return true;
+	m_keyboard = keyboard;
+	SetValue();
+
+	if (!m_action)
 	{
-		m_keyboard = dik_to_ptr(dik, true);
-		if (!m_keyboard) return true;
-
-		SetValue();
-
-		xr_strcpy(message, m_action->action_name);
-		xr_strcat(message, "=");
-		xr_strcat(message, m_keyboard->key_name);
 		OnFocusLost();
-		SendMessage2Group("key_binding", message);
 		return true;
 	}
-	return false;
+
+	string64 message;
+	xr_strcpy(message, m_action->action_name);
+	xr_strcat(message, "=");
+	xr_strcat(message, m_keyboard->key_name);
+	if (IsGamepadEditing())
+		s_gamepadEdit = nullptr;
+	OnFocusLost();
+	SendMessage2Group("key_binding", message);
+	return true;
+}
+
+bool CUIEditKeyBind::BeginGamepadEdit()
+{
+	if (!IsShown() || !IsEnabled() || !m_action)
+		return false;
+	if (s_gamepadEdit && s_gamepadEdit != this)
+		s_gamepadEdit->CancelGamepadEdit();
+	s_gamepadEdit = this;
+	SetEditMode(true);
+	return true;
+}
+
+bool CUIEditKeyBind::IsGamepadEditing() const
+{
+	return s_gamepadEdit == this;
+}
+
+void CUIEditKeyBind::CancelGamepadEdit()
+{
+	if (!IsGamepadEditing())
+		return;
+	s_gamepadEdit = nullptr;
+	OnFocusLost();
+}
+
+CUIEditKeyBind* CUIEditKeyBind::ActiveGamepadEdit(CUIWindow* receiver)
+{
+	if (!s_gamepadEdit)
+		return nullptr;
+	for (auto* window = static_cast<CUIWindow*>(s_gamepadEdit); window; window = window->GetParent())
+	{
+		if (!window->IsShown() || !window->IsEnabled())
+			break;
+		if (window == receiver)
+			return s_gamepadEdit;
+	}
+	s_gamepadEdit->CancelGamepadEdit();
+	return nullptr;
+}
+
+bool CUIEditKeyBind::HandleGamepadEditKey(CUIWindow* receiver, int dik)
+{
+	auto* edit = ActiveGamepadEdit(receiver);
+	if (!edit)
+		return false;
+	if (dik == DIK_ESCAPE)
+		edit->CancelGamepadEdit();
+	else if (dik > 0 && dik < CInput::COUNT_KB_BUTTONS)
+		edit->BindInput(dik);
+	return true;
 }
 
 void CUIEditKeyBind::SetEditMode(bool b)

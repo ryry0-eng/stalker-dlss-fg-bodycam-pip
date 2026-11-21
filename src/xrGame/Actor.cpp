@@ -20,6 +20,7 @@
 //#include "SleepEffector.h"
 #include "character_info.h"
 #include "CustomOutfit.h"
+#include "CustomZone.h"
 #include "actorcondition.h"
 #include "UIGameCustom.h"
 #include "../xrphysics/matrix_utils.h"
@@ -30,6 +31,8 @@
 
 // breakpoints
 #include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
+#include "GamepadContextDispatcher.h"
 #include "../xrEngine/svp_gameplay_cvars.h" // pip the 75 base for the through-scope sens fov
 //
 #include "Actor.h"
@@ -658,6 +661,7 @@ void CActor::Hit(SHit* pHDS)
 		if (!is_special_burn_hit_2_self)
 		{
 			mstate_wishful &= ~mcSprint;
+			m_bGamepadSprint = false;
 		}
 	}
 	if (!g_dedicated_server && !m_disabled_hitmarks)
@@ -692,6 +696,15 @@ void CActor::Hit(SHit* pHDS)
 				HDS.ApplyScriptHit(&tLuaHit);
 				HDS.power = HitArtefactsOnBelt(HDS.damage(), HDS.hit_type);
 				HDS.add_wound = true;
+
+				// D5.2: канал полученного урона (Damage) для локального актора
+				// FIX-LIVE2 п.17: радиация не «урон» для вибрации (свой толчок по росту дозы)
+				if (this == Level().CurrentControlEntity() && HDS.power > 0.001f && HDS.hit_type != ALife::eHitTypeRadiation &&
+				    pInput && pInput->GetGamepadHaptics())
+				{
+					const float dmgScale = std::clamp(0.35f + HDS.power * 1.30f, 0.35f, 1.35f);
+					pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Damage, dmgScale, 0, "Actor::Hit");
+				}
 
 				/* AVO: send script callback*/
 				callback(GameObject::eHit)(
@@ -858,6 +871,16 @@ void CActor::HitSignal(float perc, Fvector& vLocalDir, CObject* who, s16 element
 		clamp(power_factor, 0.f, 1.f);
 		VERIFY(motion_ID.valid());
 		tpKinematics->PlayFX(motion_ID, power_factor);
+
+		// D5.2: подтверждение канала полученного урона (HitSignal по кости)
+		// FIX-LIVE2 п.17: сигнал от радиационного очага не вибрирует
+		const CCustomZone* gpZone = smart_cast<const CCustomZone*>(who);
+		const bool gpRadZone = gpZone && const_cast<CCustomZone*>(gpZone)->GetHitType() == ALife::eHitTypeRadiation;
+		if (this == Level().CurrentControlEntity() && perc > 0.1f && !gpRadZone && pInput && pInput->GetGamepadHaptics())
+		{
+			const float sigScale = std::clamp(0.35f + power_factor * 1.0f, 0.35f, 1.35f);
+			pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Damage, sigScale, 0, "Actor::HitSignal");
+		}
 	}
 }
 
@@ -874,6 +897,19 @@ void CActor::Die(CObject* who)
     Msg("--- Actor [%s] dies !", this->Name());
 #endif // #ifdef DEBUG
 	inherited::Die(who);
+
+	// D5.2: мгновенная остановка вибрации при смерти актора
+	if (this == Level().CurrentControlEntity() && pInput && pInput->GetGamepadHaptics())
+	{
+		pInput->GetGamepadHaptics()->StopAll("Actor::Die");
+	}
+
+	// C3.1: сброс зума и sens_multiple при гибели актора в прицеливании (MT-MAY: только при геймпаде)
+	if (CWeapon* activeWpn = (pInput && pInput->IsGamepadActiveSource()) ? smart_cast<CWeapon*>(inventory().ActiveItem()) : nullptr)
+	{
+		if (activeWpn->IsZoomed())
+			activeWpn->OnZoomOut();
+	}
 
 	if (OnServer())
 	{
@@ -1132,6 +1168,40 @@ float CActor::currentFOV(bool wantSVPFov)
 
 #include "UI\UIInventoryUtilities.h"
 
+// FIX-LIVE2 п.17 (Миша 2026-11-16, 17а): вибрация радиации — только при подтверждённом росте дозы в очаге.
+// CCustomZone::CreateHit с eHitTypeRadiation по локальному актору пишет время/силу удара; здесь, когда доза
+// (уже после защиты костюма) выросла и удар очага был не позже 1,5 с назад, — толчок канала Anomaly вполсилы
+// прежнего (0,5 * (0,5 + hit_power)), не чаще раза в 700 мс. Рост дозы от артефакта вне очага не толкает.
+u32 g_gp_rad_zone_hit_ms = 0;
+float g_gp_rad_zone_hit_power = 0.f;
+
+static void GpRadiationDoseHaptic(CActor* actor)
+{
+	static const CActor* s_actor = nullptr;
+	static float s_last = -1.f;
+	static u32 s_pulseMs = 0;
+	const u32 now = Device.dwTimeGlobal;
+	const float rad = actor->conditions().GetRadiation();
+	if (s_actor != actor || !actor->g_Alive() || s_last < 0.f)
+	{
+		s_actor = actor;
+		s_last = rad;
+		s_pulseMs = 0;
+		return;
+	}
+	const float delta = rad - s_last;
+	s_last = rad;
+	if (delta <= 1e-5f || !g_gp_rad_zone_hit_ms || now < g_gp_rad_zone_hit_ms || now - g_gp_rad_zone_hit_ms > 1500)
+		return;
+	if (s_pulseMs && now - s_pulseMs < 700)
+		return;
+	if (!pInput || !pInput->GetGamepadHaptics())
+		return;
+	s_pulseMs = now;
+	const float scale = 0.5f * std::clamp(0.50f + g_gp_rad_zone_hit_power, 0.50f, 1.30f);
+	pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Anomaly, scale, 0, "Actor::RadiationDose");
+}
+
 void CActor::UpdateCL()
 {
 	PROF_EVENT("CActor UpdateCL");
@@ -1186,6 +1256,10 @@ void CActor::UpdateCL()
 
 	SetZoomAimingMode(false);
 	CWeapon* pWeapon = smart_cast<CWeapon*>(inventory().ActiveItem());
+
+	// C3.1: update gamepad look before camera / bodycam reference frame
+	if (Level().CurrentControlEntity() == this && !Level().IsDemoPlay())
+		UpdateGamepadLookInput(Device.fTimeDelta);
 
     const bool reference_frame = BodycamReference::EngineFrameAdapter::Update(*this,pWeapon);
     if (!reference_frame)
@@ -1807,6 +1881,8 @@ float NET_Jump = 0;
 
 void CActor::set_state_box(u32 mstate)
 {
+	m_bGamepadCrouch = (mstate & mcCrouch) != 0;
+	m_bGamepadLowCrouch = ((mstate & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel));
 	if (mstate & mcCrouch)
 	{
 		if (isActorAccelerated(mstate_real, IsZoomAimingMode()))
@@ -1870,6 +1946,7 @@ void CActor::shedule_Update(u32 DT)
 	if (Level().CurrentControlEntity() == this && !Level().IsDemoPlay())
 		//------------------------------------------------
 	{
+		UpdateGamepadMoveInput();
 		g_cl_CheckControls(mstate_wishful, NET_SavedAccel, NET_Jump, dt);
 		{
 			/*
@@ -1890,6 +1967,17 @@ void CActor::shedule_Update(u32 DT)
 
 		g_cl_ValidateMState(dt, mstate_wishful);
 		g_SetAnimation(mstate_real);
+
+		if (ps_gp_telemetry && pInput && character_physics_support() && character_physics_support()->movement())
+		{
+			const float hVel = character_physics_support()->movement()->GetXZVelocityActual();
+			const DWORD boxId = character_physics_support()->movement()->BoxID();
+			string256 line;
+			xr_sprintf(line, sizeof(line), "actor_move,%u,h_vel=%.4f,mstate_real=0x%08X,calc_yaw=%.4f,box_id=%u,gp_x=%.4f,gp_y=%.4f",
+			           Device.dwTimeGlobal, hVel, mstate_real, m_fGamepadLastCalcYaw,
+			           static_cast<u32>(boxId), m_vGamepadMove.x, m_vGamepadMove.y);
+			pInput->WriteGamepadTelemetryLine(line);
+		}
 
 		// Check for game-contacts
 		Fvector C;
@@ -1919,11 +2007,11 @@ void CActor::shedule_Update(u32 DT)
 			mstate_wishful &= ~mcRStrafe;
 			mstate_wishful &= ~mcFwd;
 			mstate_wishful &= ~mcBack;
-			if (!psActorFlags.test(AF_CROUCH_TOGGLE))
+			if (!psActorFlags.test(AF_CROUCH_TOGGLE) && !m_bGamepadCrouch)
 				mstate_wishful &= ~mcCrouch;
-			if (!psActorFlags.test(AF_WALK_TOGGLE))
+			if (!psActorFlags.test(AF_WALK_TOGGLE) && !m_bGamepadLowCrouch)
 				mstate_wishful &= ~mcAccel;
-			if (!psActorFlags.test(AF_SPRINT_TOGGLE))
+			if (!psActorFlags.test(AF_SPRINT_TOGGLE) && !m_bGamepadSprint)
 				mstate_wishful &= ~mcSprint;
 			if (!psActorFlags.test(AF_LOOKOUT_TOGGLE) || cam_freelook != eflDisabled)
 			{
@@ -1940,8 +2028,12 @@ void CActor::shedule_Update(u32 DT)
 				}
 				else
 				{
-					if (!CanUseFreelook() || !pInput->iGetAsyncKeyState(get_action_dik(kFREELOOK)))
+					if (!CanUseFreelook() ||
+					    (!pInput->iGetAsyncKeyState(get_action_dik(kFREELOOK)) &&
+					     !CGamepadContextDispatcher::Instance().IsGamepadFreelookHeld()))
+					{
 						cam_UnsetFreelook();
+					}
 				}
 			}
 		}
@@ -1987,7 +2079,10 @@ void CActor::shedule_Update(u32 DT)
 	// Звук тяжелого дыхания при усталости и хромании (Heavy breathing sound when tired or limping)
 	if (this == Level().CurrentControlEntity() && !g_dedicated_server)
 	{
-		if (conditions().IsLimping() && g_Alive() && !psActorFlags.test(AF_GODMODE_RT))
+		GpRadiationDoseHaptic(this); // FIX-LIVE2 p.17
+		// FIX-LIVE2 p.27 (Misha 2026-11-16, 27a): heavy breathing also when the hero is out of breath (stamina below
+		// the sprint threshold, IsCantSprint hysteresis), not only when limping; one loop, same sound.
+		if ((conditions().IsLimping() || conditions().IsCantSprint()) && g_Alive() && !psActorFlags.test(AF_GODMODE_RT))
 		{
 			if (!m_HeavyBreathSnd._feedback())
 			{
@@ -2059,9 +2154,15 @@ void CActor::shedule_Update(u32 DT)
 	// что актер видит перед собой (What the actor sees in front of him)
 	collide::rq_result& RQ = HUD().GetRQ();
 
-	if (!input_external_handler_installed() && RQ.O && RQ.O->getVisible() && RQ.range < 2.0f)
+	// E2.2e / INV-REWORK-24: gamepad sticky use target within 2.0 m
+	const float kMaxLookRange = 2.0f;
+	CObject* pLookTarget = (RQ.O && RQ.O->getVisible() && RQ.range < kMaxLookRange) ? RQ.O : nullptr;
+	if (!pLookTarget && !input_external_handler_installed())
+		pLookTarget = GamepadFindStickyUseTarget(this);
+
+	if (!input_external_handler_installed() && pLookTarget)
 	{
-		m_pObjectWeLookingAt = smart_cast<CGameObject*>(RQ.O);
+		m_pObjectWeLookingAt = smart_cast<CGameObject*>(pLookTarget);
 
 		CGameObject* game_object = m_pObjectWeLookingAt;
 		m_pUsableObject = smart_cast<CUsableScriptObject*>(game_object);
@@ -2100,6 +2201,10 @@ void CActor::shedule_Update(u32 DT)
 							m_sDefaultObjAction = m_sDeadCharacterUseAction;
 						}
 					} // m_pPersonWeLookingAt
+				}
+				else if (m_pInvBoxWeLookingAt && pInput && pInput->IsGamepadActiveSource()) // MT-MAY: подсказка ящика только для геймпада
+				{
+					m_sDefaultObjAction = m_sInventoryBoxUseAction;
 				}
 				else if (m_pVehicleWeLookingAt)
 				{

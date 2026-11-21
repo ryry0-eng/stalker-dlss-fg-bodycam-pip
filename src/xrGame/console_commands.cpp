@@ -72,6 +72,15 @@ string_path g_last_saved_game;
 #ifdef DEBUG
 extern float air_resistance_epsilon;
 #endif // #ifdef DEBUG
+extern float ps_gp_x_target_angle; // GamepadContextDispatcher.cpp (E2.2d)
+extern float ps_gp_cursor_size; // UICursor.cpp (FG.5c)
+extern float ps_gp_cursor_speed; // UICursor.cpp (CURSOR1)
+extern float ps_gp_cursor_brightness; // UICursor.cpp (FG.5c)
+extern int ps_gp_inv_focus_frame; // UICursor.cpp (INV-REWORK-1)
+extern int ps_gp_pda_eye_mode; // UICursor.cpp (PDA1-E)
+extern int ps_gp_pda_reticle_shape; // UICursor.cpp (FIX-LIVE2 п.8)
+extern int ps_gp_pda_reticle_size;  // UICursor.cpp (FIX-LIVE3 п.13)
+extern int ps_gp_osk_enabled;       // GamepadOnScreenKeyboard.cpp (FIX-LIVE8 I-06)
 
 extern void show_smart_cast_stats();
 extern void clear_smart_cast_stats();
@@ -1187,9 +1196,21 @@ public:
 		Msg("Game save overhead  : %f milliseconds", timer.GetElapsed_sec()*1000.f);
 #endif
 		StaticDrawableWrapper* _s = CurrentGameUI()->AddCustomStatic("game_saved", true);
-		LPSTR save_name;
-		STRCONCAT(save_name, CStringTable().translate("st_game_saved").c_str(), ": ", S);
-		_s->wnd()->TextItemControl()->SetText(save_name);
+		// MENU-FOCUS P16: one short line for every save ("Игра сохранена", autosaves "Автосохранение").
+		// Without the mod's strings the stock "<text>: <name>" stays.
+		string_path lowered;
+		xr_strcpy(lowered, S);
+		_strlwr(lowered);
+		const LPCSTR gp_id = strstr(lowered, "autosave") ? "st_gp_autosave" : "st_gp_game_saved";
+		const shared_str gp_text = CStringTable().translate(gp_id);
+		if (xr_strcmp(gp_text, gp_id) != 0)
+			_s->wnd()->TextItemControl()->SetText(gp_text.c_str());
+		else
+		{
+			LPSTR save_name;
+			STRCONCAT(save_name, CStringTable().translate("st_game_saved").c_str(), ": ", S);
+			_s->wnd()->TextItemControl()->SetText(save_name);
+		}
 
 		xr_strcat(S, ".dds");
 		FS.update_path(S1, "$game_saves$", S);
@@ -2031,6 +2052,7 @@ public:
 		xr_strcpy(I, "[on,off] or [1,0]");
 	}
 };
+#include "PauseTokenManager.h"
 class CCC_TimeFactor : public IConsole_Command
 {
 public:
@@ -2042,9 +2064,8 @@ public:
 	{
 		float time_factor = (float)atof(args);
 		clamp(time_factor, EPS, 1000.f);
-		Device.time_factor(time_factor);
-		if (!Core.ParamsData.test(ECoreParams::sound_constant_speed))
-			psSpeedOfSound = time_factor;
+		// E5.1 (D43): все внешние вызовы time_factor (включая Bullet Time kCUSTOM25) регистрируются как внешняя заявка
+		CPauseTokenManager::Instance().OnExternalTimeFactorCommand(time_factor);
 	}
 
 	virtual void Status(TStatus& S)
@@ -2467,6 +2488,1471 @@ public:
 	}
 };
 
+// C2.1: прототип, настройки — Этап D
+extern bool g_gp_synth_move_active;
+extern float g_gp_synth_move_x;
+extern float g_gp_synth_move_y;
+
+#include "PauseTokenManager.h"
+#include "../xrEngine/GamepadMath.h"
+#include "GamepadContextDispatcher.h"
+#include "GamepadCalibrationWnd.h"
+#include "GamepadRemapWnd.h"
+#include "../xrEngine/GamepadBindings.h"
+#include "GamepadAimAssist.h"
+
+class CCC_GamepadPausePush : public IConsole_Command
+{
+public:
+	CCC_GamepadPausePush(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		const char* tag = (args && args[0]) ? args : "default";
+		const u32 id = CPauseTokenManager::Instance().Acquire(tag);
+		Msg("* [Gamepad] gp_pause_push: id=%u tag=\"%s\" count=%u",
+			id, tag, CPauseTokenManager::Instance().Count());
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadPausePop : public IConsole_Command
+{
+public:
+	CCC_GamepadPausePop(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		u32 id = 0;
+		bool ok = false;
+		if (args && args[0] && sscanf(args, "%u", &id) == 1 && id > 0)
+		{
+			ok = CPauseTokenManager::Instance().Release(id);
+		}
+		else
+		{
+			ok = CPauseTokenManager::Instance().ReleaseTop("gp_pause_pop");
+		}
+		Msg("* [Gamepad] gp_pause_pop: ok=%d count=%u",
+			ok ? 1 : 0, CPauseTokenManager::Instance().Count());
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// MENU-FOCUS-5 P14: walk all Settings/MCM pages, log caption/control misalignment to appdata/gamepad/menu_layout_scan.log
+class CCC_GamepadMenuLayoutScan : public IConsole_Command
+{
+public:
+	CCC_GamepadMenuLayoutScan(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+	virtual void Execute(LPCSTR args) override
+	{
+		(void)args;
+		CGamepadContextDispatcher::Instance().StartMenuLayoutScan();
+	}
+	virtual void Save(IWriter* F) override { (void)F; }
+};
+
+class CCC_GamepadPauseState : public IConsole_Command
+{
+public:
+	CCC_GamepadPauseState(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		(void)args;
+		CPauseTokenManager::Instance().LogState();
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// C4.2: прототип, настройки — Этап D
+class CCC_GamepadTx : public IConsole_Command
+{
+public:
+	CCC_GamepadTx(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = false;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (!args || !args[0])
+		{
+			Msg("! [Gamepad] Usage: gp_tx <transfer|slot|activate|eat> ...");
+			return;
+		}
+
+		string64 subcmd = {};
+		u32 arg1 = 0;
+		u32 arg2 = 0;
+		const int n = sscanf(args, "%63s %u %u", subcmd, &arg1, &arg2);
+		if (n >= 1 && (0 == _stricmp(subcmd, "dump") || 0 == _stricmp(subcmd, "status")))
+		{
+			CPauseTokenManager::Instance().DumpTxnState(nullptr);
+			return;
+		}
+		if (n >= 1 && 0 == _stricmp(subcmd, "selftest"))
+		{
+			CPauseTokenManager::Instance().RunTxnSelfTest();
+			return;
+		}
+		if (n < 2)
+		{
+			Msg("! [Gamepad] Usage: gp_tx transfer <id> <to_id> | gp_tx slot <id> <slot> | gp_tx activate <slot> | gp_tx eat <id> | gp_tx dump | gp_tx selftest");
+			return;
+		}
+
+		if (xr_strcmp(subcmd, "transfer") == 0)
+		{
+			if (n < 3 || arg1 > 0xFFFFu || arg2 > 0xFFFFu)
+			{
+				Msg("! [Gamepad] Usage: gp_tx transfer <id> <to_id>");
+				return;
+			}
+			CPauseTokenManager::Instance().ExecuteOrQueueTransfer(static_cast<u16>(arg1), static_cast<u16>(arg2));
+		}
+		else if (xr_strcmp(subcmd, "slot") == 0)
+		{
+			if (n < 3 || arg1 > 0xFFFFu || arg2 > 0xFFFFu)
+			{
+				Msg("! [Gamepad] Usage: gp_tx slot <id> <slot>");
+				return;
+			}
+			CPauseTokenManager::Instance().ExecuteOrQueueSlot(static_cast<u16>(arg1), static_cast<u16>(arg2));
+		}
+		else if (xr_strcmp(subcmd, "activate") == 0)
+		{
+			if (arg1 > 0xFFFFu)
+			{
+				Msg("! [Gamepad] Usage: gp_tx activate <slot>");
+				return;
+			}
+			CPauseTokenManager::Instance().ExecuteOrQueueActivate(static_cast<u16>(arg1));
+		}
+		else if (xr_strcmp(subcmd, "eat") == 0)
+		{
+			if (arg1 > 0xFFFFu)
+			{
+				Msg("! [Gamepad] Usage: gp_tx eat <id>");
+				return;
+			}
+			CPauseTokenManager::Instance().ExecuteOrQueueEat(static_cast<u16>(arg1));
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_tx subcommand \"%s\". Expected: transfer|slot|activate|eat|dump|selftest", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// F4.1: консольная команда дампа и самопроверки диспетчера транзакций A/B/C/D
+class CCC_GamepadTxnDump : public IConsole_Command
+{
+public:
+	CCC_GamepadTxnDump(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+		bLowerCaseArgs = false;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		if (args && args[0])
+		{
+			sscanf(args, "%63s", subcmd);
+		}
+		CPauseTokenManager::Instance().DumpTxnState(subcmd[0] ? subcmd : nullptr);
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// C4.2c (D33): консольная настройка режима анимаций расходников в очереди после паузы
+extern u32 g_gp_queue_consumable_anim;
+static xr_token gp_queue_consumable_anim_tokens[] = {
+	{ "per_category", 0 },
+	{ "per_item", 1 },
+	{ nullptr, 0 }
+};
+
+// C5.1: консольная команда фокусного тестового окна и моста в ui_inventory.GUI
+class CCC_GamepadFocusTest : public IConsole_Command
+{
+public:
+	CCC_GamepadFocusTest(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+		bLowerCaseArgs = false;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		string64 arg1 = "";
+		int n = 0;
+		if (args && args[0])
+		{
+			n = sscanf(args, "%63s %63s", subcmd, arg1);
+		}
+
+		auto& ptm = CPauseTokenManager::Instance();
+		if (n <= 0 || !subcmd[0] || 0 == _stricmp(subcmd, "toggle"))
+		{
+			ptm.ToggleFocusTestWindow();
+		}
+		else if (0 == _stricmp(subcmd, "open") || 0 == _stricmp(subcmd, "modal1"))
+		{
+			ptm.OpenFocusTestWindow();
+		}
+		else if (0 == _stricmp(subcmd, "close"))
+		{
+			ptm.CloseFocusTestWindow();
+		}
+		else if (0 == _stricmp(subcmd, "op") || 0 == _stricmp(subcmd, "step"))
+		{
+			if (!ptm.IsFocusTestWindowOpen())
+			{
+				ptm.OpenFocusTestWindow();
+			}
+			ptm.ExecuteFocusTestBridgeOp("console_op");
+		}
+		else if (0 == _stricmp(subcmd, "state") || 0 == _stricmp(subcmd, "dump"))
+		{
+			ptm.LogState();
+			ptm.DumpFocusTestModalState();
+		}
+		else if (0 == _stricmp(subcmd, "selftest") || 0 == _stricmp(subcmd, "test"))
+		{
+			ptm.RunFocusTestModalSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "populate"))
+		{
+			const int count = (n >= 2 && atoi(arg1) > 0) ? atoi(arg1) : gpmodal::FocusModalTestController::kDefaultListCount;
+			ptm.PopulateFocusTestItems(count);
+		}
+		else if (0 == _stricmp(subcmd, "del_first") || 0 == _stricmp(subcmd, "first"))
+		{
+			ptm.DeleteFocusTestItem("first");
+		}
+		else if (0 == _stricmp(subcmd, "del_middle") || 0 == _stricmp(subcmd, "middle") || 0 == _stricmp(subcmd, "mid"))
+		{
+			ptm.DeleteFocusTestItem("middle");
+		}
+		else if (0 == _stricmp(subcmd, "del_last") || 0 == _stricmp(subcmd, "last"))
+		{
+			ptm.DeleteFocusTestItem("last");
+		}
+		else if (0 == _stricmp(subcmd, "del_single") || 0 == _stricmp(subcmd, "single"))
+		{
+			ptm.DeleteFocusTestItem("single");
+		}
+		else if (0 == _stricmp(subcmd, "del_focused") || 0 == _stricmp(subcmd, "focused") || 0 == _stricmp(subcmd, "del"))
+		{
+			ptm.DeleteFocusTestItem("focused");
+		}
+		else if (0 == _stricmp(subcmd, "modal2") || 0 == _stricmp(subcmd, "push2"))
+		{
+			if (!ptm.IsFocusTestWindowOpen() && g_pGameLevel && CurrentGameUI())
+				ptm.OpenFocusTestWindow();
+			ptm.OpenFocusTestModalToDepth(2);
+		}
+		else if (0 == _stricmp(subcmd, "modal3") || 0 == _stricmp(subcmd, "push3"))
+		{
+			if (!ptm.IsFocusTestWindowOpen() && g_pGameLevel && CurrentGameUI())
+				ptm.OpenFocusTestWindow();
+			ptm.OpenFocusTestModalToDepth(3);
+		}
+		else if (0 == _stricmp(subcmd, "cancel_b") || 0 == _stricmp(subcmd, "pop"))
+		{
+			ptm.CancelFocusTestTopModal("console_cancel_b");
+		}
+		else if (0 == _stricmp(subcmd, "emergency_reset") || 0 == _stricmp(subcmd, "clear_all"))
+		{
+			ptm.EmergencyCloseFocusTestModalStack("console_emergency_reset");
+		}
+		else if (0 == _stricmp(subcmd, "widgets") || 0 == _stricmp(subcmd, "f2_1"))
+		{
+			ptm.SetFocusTestWidgetsMode(true);
+			ptm.PopulateWidgetsShowcaseItems();
+			if (!ptm.IsFocusTestWindowOpen() && g_pGameLevel && CurrentGameUI())
+				ptm.OpenFocusTestWindow();
+		}
+		else if (0 == _stricmp(subcmd, "widgets_selftest") || 0 == _stricmp(subcmd, "f2_1_test"))
+		{
+			ptm.RunWidgetsShowcaseSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "widgets_dump") || 0 == _stricmp(subcmd, "f2_1_dump"))
+		{
+			ptm.DumpWidgetsShowcaseState();
+		}
+		else if (0 == _stricmp(subcmd, "widgets_view") || 0 == _stricmp(subcmd, "toggle_view"))
+		{
+			ptm.GetWidgetShowcaseController().ToggleListGridView(Device.dwTimeContinual);
+			Msg("* [Gamepad] %s", ptm.GetWidgetShowcaseController().GetLastStatusMessage().c_str());
+		}
+		else if (0 == _stricmp(subcmd, "widgets_tab"))
+		{
+			const int delta = (n >= 2 && (0 == _stricmp(arg1, "prev") || 0 == _stricmp(arg1, "-1"))) ? -1 : +1;
+			ptm.GetWidgetShowcaseController().StepTopTab(delta, Device.dwTimeContinual);
+			Msg("* [Gamepad] %s", ptm.GetWidgetShowcaseController().GetLastStatusMessage().c_str());
+		}
+		else if (0 == _stricmp(subcmd, "widgets_cat"))
+		{
+			const int delta = (n >= 2 && (0 == _stricmp(arg1, "prev") || 0 == _stricmp(arg1, "-1"))) ? -1 : +1;
+			ptm.GetWidgetShowcaseController().StepCategoryFilter(delta, Device.dwTimeContinual);
+			Msg("* [Gamepad] %s", ptm.GetWidgetShowcaseController().GetLastStatusMessage().c_str());
+		}
+		else if (0 == _stricmp(subcmd, "widgets_slot"))
+		{
+			ptm.GetWidgetShowcaseController().ToggleCompareSlot(Device.dwTimeContinual);
+			Msg("* [Gamepad] %s", ptm.GetWidgetShowcaseController().GetLastStatusMessage().c_str());
+		}
+		else if (0 == _stricmp(subcmd, "widgets_100"))
+		{
+			ptm.GetWidgetShowcaseController().ToggleFullStats100(Device.dwTimeContinual);
+			Msg("* [Gamepad] %s", ptm.GetWidgetShowcaseController().GetLastStatusMessage().c_str());
+		}
+		else if (0 == _stricmp(subcmd, "widgets_glyph"))
+		{
+			ptm.GetWidgetShowcaseController().CycleGlyphStyle(Device.dwTimeContinual);
+			Msg("* [Gamepad] %s", ptm.GetWidgetShowcaseController().GetLastStatusMessage().c_str());
+		}
+		else if (0 == _stricmp(subcmd, "mode"))
+		{
+			if (n >= 2 && (0 == _stricmp(arg1, "modal") || 0 == _stricmp(arg1, "f1_2")))
+				ptm.SetFocusTestWidgetsMode(false);
+			else if (n >= 2 && (0 == _stricmp(arg1, "widgets") || 0 == _stricmp(arg1, "f2_1")))
+				ptm.SetFocusTestWidgetsMode(true);
+			else
+				ptm.SetFocusTestWidgetsMode(!ptm.IsFocusTestWidgetsMode());
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_focus_test subcommand \"%s\". Expected: [toggle|open|close|op|state|dump|selftest|populate <N>|del_first|del_middle|del_last|del_single|del_focused|modal2|modal3|cancel_b|emergency_reset|widgets|widgets_selftest|widgets_dump|widgets_view|widgets_tab|widgets_cat|widgets_slot|widgets_100|widgets_glyph|mode]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// F1.1: консольная команда дампа и самопроверки графа фокуса (gp_focus_dump)
+class CCC_GamepadFocusDump : public IConsole_Command
+{
+public:
+	CCC_GamepadFocusDump(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+		bLowerCaseArgs = false;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		CPauseTokenManager::Instance().DumpFocusGraph(args);
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// D3.1: консольная команда диспетчера контекстов геймпада (gp_ctx)
+class CCC_GamepadContext : public IConsole_Command
+{
+public:
+	CCC_GamepadContext(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+		bLowerCaseArgs = false;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		auto& disp = CGamepadContextDispatcher::Instance();
+		disp.OnFrame();
+
+		string64 subcmd = "";
+		string64 key = "";
+		string64 valStr = "";
+		int n = 0;
+		if (args && args[0])
+		{
+			n = sscanf(args, "%63s %63s %63s", subcmd, key, valStr);
+		}
+
+		if (n <= 0 || 0 == _stricmp(subcmd, "state") || 0 == _stricmp(subcmd, "status"))
+		{
+			disp.LogState();
+		}
+		else if (0 == _stricmp(subcmd, "selftest") || 0 == _stricmp(subcmd, "test"))
+		{
+			disp.RunSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "barrier") || 0 == _stricmp(subcmd, "consume"))
+		{
+			disp.ConsumeAllCurrentlyHeldButtons();
+			Msg("* [Gamepad] gp_ctx barrier: armed consumed_until_release for raw=0x%05X -> barrier=0x%05X",
+			    disp.GetRawDownMask(), disp.GetConsumedUntilReleaseMask());
+		}
+		else if (0 == _stricmp(subcmd, "sync_lua"))
+		{
+			disp.PollLuaBridgeHints();
+			disp.OnFrame();
+			disp.LogState();
+		}
+		else if (0 == _stricmp(subcmd, "inject"))
+		{
+			if (n < 2)
+			{
+				Msg("! [Gamepad] Usage: gp_ctx inject <action_name_or_dik> [press|release|hold|tap]");
+				return;
+			}
+			const char* phase = (n >= 3) ? valStr : "tap";
+			EGameActions act = action_name_to_id(key);
+			int dik = 0;
+			int actId = kNOTBINDED;
+			if (act != kNOTBINDED)
+			{
+				actId = static_cast<int>(act);
+				dik = disp.ResolveActionDik(actId);
+			}
+			else
+			{
+				dik = atoi(key);
+				if (dik > 0)
+					actId = static_cast<int>(get_binded_action(dik));
+			}
+
+			if (dik <= 0)
+			{
+				Msg("! [Gamepad] gp_ctx inject: could not resolve DIK for \"%s\"", key);
+				return;
+			}
+
+			if (0 == _stricmp(phase, "tap"))
+			{
+				disp.InjectKeyboardEvent(dik, actId, "press", disp.GetCurrentContext(), true);
+				disp.InjectKeyboardEvent(dik, actId, "release", disp.GetCurrentContext(), true);
+			}
+			else
+			{
+				disp.InjectKeyboardEvent(dik, actId, phase, disp.GetCurrentContext(), true);
+			}
+		}
+		else if (0 == _stricmp(subcmd, "lua"))
+		{
+			if (n < 2 || 0 == _stricmp(key, "reset"))
+			{
+				disp.ResetLuaHints("gp_ctx_lua_reset");
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua: hints reset");
+			}
+			else if (0 == _stricmp(key, "sleep"))
+			{
+				const bool active = (n >= 3 && atoi(valStr) != 0);
+				disp.SetLuaSleepDialogShown(active);
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua sleep=%d -> ctx=%s", active ? 1 : 0, CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else if (0 == _stricmp(key, "sleep_info"))
+			{
+				const bool active = (n >= 3 && atoi(valStr) != 0);
+				disp.SetLuaActorSleepingInfo(active);
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua sleep_info=%d -> ctx=%s", active ? 1 : 0, CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else if (0 == _stricmp(key, "fdda"))
+			{
+				const bool active = (n >= 3 && atoi(valStr) != 0);
+				disp.SetLuaFddaInputDisabled(active);
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua fdda=%d -> ctx=%s", active ? 1 : 0, CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else if (0 == _stricmp(key, "mcm_bind"))
+			{
+				const bool active = (n >= 3 && atoi(valStr) != 0);
+				disp.SetLuaMcmKeybindCapture(active);
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua mcm_bind=%d -> ctx=%s", active ? 1 : 0, CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else if (0 == _stricmp(key, "wheel"))
+			{
+				const int w = (n >= 3) ? clampr(atoi(valStr), 0, 5) : 0;
+				disp.SetLuaRadialWheelType(static_cast<CGamepadContextDispatcher::ERadialWheelType>(w));
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua wheel=%s -> ctx=%s",
+				    CGamepadContextDispatcher::GetRadialWheelTypeName(disp.GetLuaHints().radialWheelType),
+				    CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else if (0 == _stricmp(key, "placement"))
+			{
+				const int p = (n >= 3) ? atoi(valStr) : 0;
+				CGamepadContextDispatcher::EPlacementState st = CGamepadContextDispatcher::EPlacementState::None;
+				if (p == 2) st = CGamepadContextDispatcher::EPlacementState::Holding;
+				else if (p == 3) st = CGamepadContextDispatcher::EPlacementState::AdvCtrl;
+				else if (p == 4) st = CGamepadContextDispatcher::EPlacementState::Preview;
+				disp.SetLuaPlacementState(st);
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua placement=%s -> ctx=%s",
+				    CGamepadContextDispatcher::GetPlacementStateName(disp.GetLuaHints().placementState),
+				    CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else if (0 == _stricmp(key, "modal_tag"))
+			{
+				disp.SetLuaModalMenuTag((n >= 3) ? valStr : "");
+				disp.OnFrame();
+				Msg("* [Gamepad] gp_ctx lua modal_tag=\"%s\" -> ctx=%s",
+				    disp.GetLuaHints().modalMenuTag.size() ? disp.GetLuaHints().modalMenuTag.c_str() : "",
+				    CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext()));
+			}
+			else
+			{
+				Msg("! [Gamepad] Unknown gp_ctx lua key \"%s\". Expected: [reset|sleep|sleep_info|fdda|mcm_bind|wheel|placement|modal_tag]", key);
+			}
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_ctx subcommand \"%s\". Expected: [state|selftest|barrier|lua ...]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// D2.2 / D39: консольная команда gp_calib для живого экрана калибровки и управления профилем (appdata\gamepad\profile.ltx)
+class CCC_GamepadCalib : public IConsole_Command
+{
+public:
+	CCC_GamepadCalib(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		string64 arg1 = "";
+		string64 arg2 = "";
+		string64 arg3 = "";
+		const int n = (args && args[0]) ? sscanf(args, "%63s %63s %63s %63s", subcmd, arg1, arg2, arg3) : 0;
+
+		if (n <= 0 || 0 == _stricmp(subcmd, "toggle"))
+		{
+			CGamepadCalibrationUI::Instance().Toggle("gp_calib");
+		}
+		else if (0 == _stricmp(subcmd, "open") || 0 == _stricmp(subcmd, "1") || 0 == _stricmp(subcmd, "on"))
+		{
+			CGamepadCalibrationUI::Instance().Open("gp_calib");
+		}
+		else if (0 == _stricmp(subcmd, "close") || 0 == _stricmp(subcmd, "0") || 0 == _stricmp(subcmd, "off"))
+		{
+			CGamepadCalibrationUI::Instance().Close("gp_calib");
+		}
+		else if (0 == _stricmp(subcmd, "status") || 0 == _stricmp(subcmd, "state"))
+		{
+			CGamepadCalibrationUI::Instance().LogStatus();
+		}
+		else if (0 == _stricmp(subcmd, "save"))
+		{
+			gpmath::SaveCalibrationProfile();
+		}
+		else if (0 == _stricmp(subcmd, "reload") || 0 == _stricmp(subcmd, "load"))
+		{
+			gpmath::LoadCalibrationProfile();
+			gpaa::g_disableOnScope = gpmath::GetCalibrationProfile().disable_aa_on_scope ? 1 : 0;
+		}
+		else if (0 == _stricmp(subcmd, "reset"))
+		{
+			gpmath::ResetCalibrationProfileToDefaults();
+			gpaa::g_disableOnScope = gpmath::GetCalibrationProfile().disable_aa_on_scope ? 1 : 0;
+			gpmath::SaveCalibrationProfile();
+			Msg("* [Gamepad] gp_calib reset: restored defaults and saved profile");
+		}
+		else if (0 == _stricmp(subcmd, "selftest"))
+		{
+			CGamepadCalibrationUI::Instance().RunSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "set") && n >= 4)
+		{
+			gpmath::CalibrationProfile& p = gpmath::GetMutableCalibrationProfile();
+			auto applyStickParam = [&](gpmath::StickConfig& s, bool isRight)
+			{
+				if (0 == _stricmp(arg2, "shape"))
+					s.shape = (0 == _stricmp(arg3, "axial") || 0 == _stricmp(arg3, "1")) ? gpmath::DeadzoneShape::Axial : gpmath::DeadzoneShape::Radial;
+				else if (0 == _stricmp(arg2, "deadzone"))
+					s.deadzone = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "saturation"))
+					s.saturation = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "curve"))
+				{
+					if (0 == _stricmp(arg3, "power") || 0 == _stricmp(arg3, "1")) s.curve.type = gpmath::CurveType::Power;
+					else if (0 == _stricmp(arg3, "scurve") || 0 == _stricmp(arg3, "2")) s.curve.type = gpmath::CurveType::SCurve;
+					else if (0 == _stricmp(arg3, "twozone") || 0 == _stricmp(arg3, "3")) s.curve.type = gpmath::CurveType::TwoZone;
+					else s.curve.type = gpmath::CurveType::Linear;
+				}
+				else if (0 == _stricmp(arg2, "gamma"))
+					s.curve.gamma = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "s_exponent"))
+					s.curve.s_exponent = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "knee_in"))
+					s.curve.knee_in = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "knee_out"))
+					s.curve.knee_out = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "invert_x"))
+					s.invert_x = (0 == _stricmp(arg3, "1") || 0 == _stricmp(arg3, "on") || 0 == _stricmp(arg3, "true"));
+				else if (0 == _stricmp(arg2, "invert_y"))
+					s.invert_y = (0 == _stricmp(arg3, "1") || 0 == _stricmp(arg3, "on") || 0 == _stricmp(arg3, "true"));
+				else if (isRight && 0 == _stricmp(arg2, "omega_horz"))
+					p.omega_horz = static_cast<float>(atof(arg3));
+				else if (isRight && 0 == _stricmp(arg2, "omega_vert"))
+					p.omega_vert = static_cast<float>(atof(arg3));
+				else if (isRight && 0 == _stricmp(arg2, "ads_sens_mult"))
+					p.ads_sens_mult = static_cast<float>(atof(arg3));
+				else if (isRight && 0 == _stricmp(arg2, "turn_accel"))
+					p.turn_accel = static_cast<float>(atof(arg3));
+				else if (isRight && 0 == _stricmp(arg2, "disable_aa_on_scope"))
+				{
+					p.disable_aa_on_scope = (0 == _stricmp(arg3, "1") || 0 == _stricmp(arg3, "on") || 0 == _stricmp(arg3, "true"));
+					gpaa::g_disableOnScope = p.disable_aa_on_scope ? 1 : 0;
+				}
+			};
+			auto applyTrigParam = [&](gpmath::TriggerConfig& t)
+			{
+				if (0 == _stricmp(arg2, "deadzone")) t.deadzone = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "saturation")) t.saturation = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "press")) t.press = static_cast<float>(atof(arg3));
+				else if (0 == _stricmp(arg2, "release")) t.release = static_cast<float>(atof(arg3));
+			};
+
+			if (0 == _stricmp(arg1, "left_stick")) applyStickParam(p.left_stick, false);
+			else if (0 == _stricmp(arg1, "right_stick")) applyStickParam(p.right_stick, true);
+			else if (0 == _stricmp(arg1, "ui_stick")) applyStickParam(p.ui_stick, false);
+			else if (0 == _stricmp(arg1, "left_trigger")) applyTrigParam(p.left_trigger);
+			else if (0 == _stricmp(arg1, "right_trigger")) applyTrigParam(p.right_trigger);
+
+			gpmath::SanitizeProfile(p, nullptr);
+			gpmath::SaveCalibrationProfile();
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_calib subcommand \"%s\". Expected: [open|close|toggle|status|save|reload|reset|selftest|set <sec> <key> <val>]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// D4.2 / D39: консольные команды gp_remap (экран переназначения и мастер уровня C) и gp_bind_reset (аварийный сброс)
+class CCC_GamepadRemap : public IConsole_Command
+{
+public:
+	CCC_GamepadRemap(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+		bLowerCaseArgs = false;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		string128 arg1 = "";
+		string128 arg2 = "";
+		string128 arg3 = "";
+		const int n = (args && args[0]) ? sscanf(args, "%63s %127s %127s %127s", subcmd, arg1, arg2, arg3) : 0;
+
+		if (n <= 0 || 0 == _stricmp(subcmd, "toggle"))
+		{
+			CGamepadRemapUI::Instance().Toggle("gp_remap");
+		}
+		else if (0 == _stricmp(subcmd, "open") || 0 == _stricmp(subcmd, "1") || 0 == _stricmp(subcmd, "on"))
+		{
+			CGamepadRemapUI::Instance().Open("gp_remap", false);
+		}
+		else if (0 == _stricmp(subcmd, "wizard") || 0 == _stricmp(subcmd, "class_c"))
+		{
+			CGamepadRemapUI::Instance().OpenWizard("gp_remap_wizard");
+		}
+		else if (0 == _stricmp(subcmd, "close") || 0 == _stricmp(subcmd, "0") || 0 == _stricmp(subcmd, "off"))
+		{
+			CGamepadRemapUI::Instance().Close("gp_remap");
+		}
+		else if (0 == _stricmp(subcmd, "status") || 0 == _stricmp(subcmd, "state"))
+		{
+			CGamepadRemapUI::Instance().LogStatus();
+		}
+		else if (0 == _stricmp(subcmd, "save"))
+		{
+			gpbind::SaveActiveBindingProfile();
+		}
+		else if (0 == _stricmp(subcmd, "reload") || 0 == _stricmp(subcmd, "load"))
+		{
+			gpbind::LoadActiveBindingProfile();
+		}
+		else if (0 == _stricmp(subcmd, "reset"))
+		{
+			gpbind::ResetActiveBindingProfileEmergency("gp_remap_reset");
+		}
+		else if (0 == _stricmp(subcmd, "export"))
+		{
+			gpbind::ExportActiveBindingProfile((n >= 2 && arg1[0]) ? arg1 : nullptr);
+		}
+		else if (0 == _stricmp(subcmd, "import"))
+		{
+			gpbind::ImportActiveBindingProfile((n >= 2 && arg1[0]) ? arg1 : nullptr);
+		}
+		else if (0 == _stricmp(subcmd, "selftest"))
+		{
+			CGamepadRemapUI::Instance().RunSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "set") && n >= 4)
+		{
+			const gpbind::ContextId ctx = gpbind::BindingProfileModel::StringToContext(arg1);
+			const gpbind::ActionId act = gpbind::BindingProfileModel::StringToAction(arg2);
+			gpbind::BindingTrigger trig;
+			if (!gpbind::BindingProfileModel::TryParseTriggerSpec(arg3, trig))
+			{
+				Msg("! [Gamepad] gp_remap set: invalid trigger spec \"%s\"", arg3);
+				return;
+			}
+			const gpbind::EditResult res = gpbind::GetMutableActiveBindingProfile().SetBinding(ctx, act, trig, true);
+			if (res.Succeeded())
+			{
+				gpbind::SaveActiveBindingProfile();
+				Msg("* [Gamepad] gp_remap set: %s.%s = %s (status=%d)",
+				    gpbind::BindingProfileModel::ContextToString(ctx),
+				    gpbind::BindingProfileModel::ActionToString(act),
+				    gpbind::BindingProfileModel::FormatTriggerSpec(trig).c_str(),
+				    static_cast<int>(res.status));
+			}
+			else
+			{
+				Msg("! [Gamepad] gp_remap set refused (status=%d): %s",
+				    static_cast<int>(res.status), res.message.c_str());
+			}
+		}
+		else if (0 == _stricmp(subcmd, "unbind") && n >= 3)
+		{
+			const gpbind::ContextId ctx = gpbind::BindingProfileModel::StringToContext(arg1);
+			const gpbind::ActionId act = gpbind::BindingProfileModel::StringToAction(arg2);
+			const gpbind::EditResult res = gpbind::GetMutableActiveBindingProfile().UnbindAction(ctx, act);
+			if (res.Succeeded())
+			{
+				gpbind::SaveActiveBindingProfile();
+				Msg("* [Gamepad] gp_remap unbind: %s.%s unbound",
+				    gpbind::BindingProfileModel::ContextToString(ctx),
+				    gpbind::BindingProfileModel::ActionToString(act));
+			}
+			else
+			{
+				Msg("! [Gamepad] gp_remap unbind refused (status=%d): %s",
+				    static_cast<int>(res.status), res.message.c_str());
+			}
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_remap subcommand \"%s\". Expected: [open|wizard|close|toggle|status|save|reload|reset|export|import|set|unbind|selftest]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadBindReset : public IConsole_Command
+{
+public:
+	CCC_GamepadBindReset(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		(void)args;
+		gpbind::ResetActiveBindingProfileEmergency("gp_bind_reset");
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// E3.2: консольная команда gp_actions_unreached — проверка покрытия 70 действий движка + 59 хоткеев MCM по текущей раскладке
+class CCC_GamepadActionsUnreached : public IConsole_Command
+{
+public:
+	CCC_GamepadActionsUnreached(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		CGamepadRemapUI::Instance().LogActionsUnreached(args ? args : "");
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// C3.1: прототип, настройки — Этап D
+#include "CharacterPhysicsSupport.h"
+#include "PHMovementControl.h"
+#include "actorcondition.h"
+#include "inventory.h"
+#include "../xrphysics/IElevatorState.h"
+
+// E1.1 (6): консольная команда gp_move_state — текущий режим передвижения, множители, флаги и самопроверка инвариантов E1.1
+class CCC_GamepadMoveState : public IConsole_Command
+{
+public:
+	CCC_GamepadMoveState(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	static LPCSTR GetEnvName(CPHMovementControl::EEnvironment env)
+	{
+		switch (env)
+		{
+		case CPHMovementControl::peOnGround: return "peOnGround";
+		case CPHMovementControl::peAtWall:   return "peAtWall";
+		case CPHMovementControl::peInAir:    return "peInAir";
+		default:                             return "unknown";
+		}
+	}
+
+	static LPCSTR GetElevatorStateName(int st)
+	{
+		switch (st)
+		{
+		case ::clbNone:         return "clbNone";
+		case ::clbNearUp:       return "clbNearUp";
+		case ::clbNearDown:     return "clbNearDown";
+		case ::clbClimbingUp:   return "clbClimbingUp";
+		case ::clbClimbingDown: return "clbClimbingDown";
+		case ::clbDepart:       return "clbDepart";
+		case ::clbNoLadder:     return "clbNoLadder";
+		default:                return "none";
+		}
+	}
+
+	static LPCSTR DeterminePrimaryMode(CActor* pActor, u32 mstateReal, DWORD boxId)
+	{
+		if (!pActor->CanMove())
+			return "cant_move";
+		if (mstateReal & mcClimb)
+			return "climb";
+		if (mstateReal & (mcJump | mcFall | mcLanding | mcLanding2))
+			return "air_jump_fall";
+		if ((mstateReal & mcCrouch) != 0)
+		{
+			if (boxId == 2 || (mstateReal & mcAccel) != 0 || pActor->IsGamepadLowCrouchActive())
+				return "low_crouch";
+			return "crouch";
+		}
+		if (mstateReal & mcSprint)
+			return "sprint";
+		if (mstateReal & mcAnyMove)
+		{
+			const bool bAccel = isActorAccelerated(mstateReal, pActor->IsZoomAimingMode()) && pActor->CanAccelerate();
+			return bAccel ? "run" : "walk";
+		}
+		return "stand";
+	}
+
+	static bool RunSelfTest()
+	{
+		u32 passed = 0;
+		u32 failed = 0;
+		auto check = [&](bool cond, LPCSTR name)
+		{
+			if (cond)
+			{
+				++passed;
+			}
+			else
+			{
+				++failed;
+				Msg("! [Gamepad] gp_move_state selftest FAIL: %s", name);
+			}
+		};
+
+		// 1. FIX-LIVE2 п.14/п.22: бег держится вперёд, по диагонали и строго вбок без урезания боковой составляющей;
+		//    снимают только стик назад (gy < -0.35 * |LS|) и отпущенный стик (просьба хранится в CActor, не здесь)
+		float vx = 0.f, vz = 0.f;
+		check(CActor::EvaluateGamepadSprintCone(0.f, 1.f, 1.f, vx, vz) && _abs(vx) < 1e-5f && _abs(vz - 1.f) < 1e-5f,
+		      "fl2_sprint_fwd");
+		check(CActor::EvaluateGamepadSprintCone(0.8660254f, 0.5f, 1.f, vx, vz) && _abs(vx - 0.8660254f) < 1e-4f,
+		      "fl2_sprint_60deg_lat_not_scaled");
+		check(CActor::EvaluateGamepadSprintCone(1.f, 0.f, 1.f, vx, vz) && _abs(vx - 1.f) < 1e-4f,
+		      "fl2_sprint_pure_strafe_kept");
+		check(CActor::EvaluateGamepadSprintCone(0.94f, -0.34f, 1.f, vx, vz),
+		      "fl2_sprint_110deg_kept");
+		check(!CActor::EvaluateGamepadSprintCone(0.f, -1.f, 1.f, vx, vz),
+		      "fl2_sprint_back_cancels");
+		check(!CActor::EvaluateGamepadSprintCone(0.f, 0.f, 0.f, vx, vz),
+		      "fl2_sprint_stick_released_not_in_cone");
+
+		// 2. D16 / E1.1 (2, 5): автомат поз B (Toggle присед / Hold низкий присед) и L3 (Toggle спринт + выход из приседа)
+		bool bCrouch = false, bLowCrouch = false, bSprint = false;
+		u32 wf = 0;
+		// Tap B: стоя -> обычный присед (mcCrouch без mcAccel)
+		CActor::StepGamepadPostureState(false, false, bCrouch, bLowCrouch, bSprint, wf);
+		check(bCrouch && !bLowCrouch && !bSprint && (wf & mcCrouch) != 0 && (wf & mcAccel) == 0,
+		      "d16_tap_B_stand_to_crouch_no_accel");
+		// Повторный Tap B: обычный присед -> стоя
+		CActor::StepGamepadPostureState(false, false, bCrouch, bLowCrouch, bSprint, wf);
+		check(!bCrouch && !bLowCrouch && (wf & (mcCrouch | mcAccel)) == 0,
+		      "d16_tap_B_crouch_to_stand");
+		// Hold B: стоя -> низкий присед (mcCrouch | mcAccel)
+		CActor::StepGamepadPostureState(true, false, bCrouch, bLowCrouch, bSprint, wf);
+		check(bCrouch && bLowCrouch && ((wf & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel)),
+		      "d16_hold_B_stand_to_low_crouch");
+		// Повторный Hold B из низкого приседа -> обычный присед (выход из Box 2 в Box 1 без клавиатуры)
+		CActor::StepGamepadPostureState(true, false, bCrouch, bLowCrouch, bSprint, wf);
+		check(bCrouch && !bLowCrouch && (wf & mcCrouch) != 0 && (wf & mcAccel) == 0,
+		      "d16_hold_B_low_crouch_to_normal_crouch");
+		// Возврат в низкий присед и выход через Tap B -> сразу стоя (Box 0)
+		CActor::StepGamepadPostureState(true, false, bCrouch, bLowCrouch, bSprint, wf);
+		check(bCrouch && bLowCrouch, "d16_reenter_low_crouch");
+		CActor::StepGamepadPostureState(false, false, bCrouch, bLowCrouch, bSprint, wf);
+		check(!bCrouch && !bLowCrouch && (wf & (mcCrouch | mcAccel)) == 0,
+		      "d16_tap_B_exits_low_crouch_to_stand");
+		// Выход из низкого приседа нажатием L3 (спринт): снимает mcCrouch | mcAccel и включает mcSprint
+		CActor::StepGamepadPostureState(true, false, bCrouch, bLowCrouch, bSprint, wf);
+		CActor::StepGamepadPostureState(false, true, bCrouch, bLowCrouch, bSprint, wf);
+		check(!bCrouch && !bLowCrouch && bSprint && (wf & (mcCrouch | mcAccel)) == 0 && (wf & mcSprint) != 0,
+		      "d16_press_L3_exits_low_crouch_into_sprint");
+		// Повторное нажатие L3: выключает спринт (Toggle)
+		CActor::StepGamepadPostureState(false, true, bCrouch, bLowCrouch, bSprint, wf);
+		check(!bSprint && (wf & mcSprint) == 0,
+		      "d16_press_L3_toggles_sprint_off");
+
+		// 2b. E1.2b: регрессия «короткое B не включает присед при g_crouch_toggle=on».
+		// Диспетчер инъецирует kCROUCH перед StepGamepadPostureState; при тумблере движок уже сделал
+		// mstate_wishful ^= mcCrouch. Автомат обязан решать по флагам геймпада, а не по этому биту.
+		{
+			bool c = false, lc = false, sp = false;
+			u32 w = mcCrouch; // стоя; инъекция kCROUCH (toggle=on) уже поставила mcCrouch
+			CActor::StepGamepadPostureState(false, false, c, lc, sp, w);
+			check(c && !lc && (w & mcCrouch) != 0 && (w & mcAccel) == 0,
+			      "e1_2b_tap_B_stand_with_injected_toggle_bit_enters_crouch");
+			// Выход: присед (c=true), инъекция toggle=on уже сняла mcCrouch -> короткое B должно дать стоя, а не присед
+			w = 0;
+			CActor::StepGamepadPostureState(false, false, c, lc, sp, w);
+			check(!c && !lc && (w & (mcCrouch | mcAccel)) == 0,
+			      "e1_2b_tap_B_crouch_with_injected_toggle_bit_cleared_exits_to_stand");
+			// Выход из приседа, когда инъекция бит не меняла (toggle=off): результат тот же
+			c = true; lc = false; w = mcCrouch;
+			CActor::StepGamepadPostureState(false, false, c, lc, sp, w);
+			check(!c && (w & mcCrouch) == 0, "e1_2b_tap_B_crouch_without_injection_exits_to_stand");
+			// Удержание B (низкий присед) не затронуто: из стоя с инъецированным mcCrouch -> mcCrouch | mcAccel
+			c = false; lc = false; w = mcCrouch;
+			CActor::StepGamepadPostureState(true, false, c, lc, sp, w);
+			check(c && lc && (w & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel),
+			      "e1_2b_hold_B_with_injected_toggle_bit_still_low_crouch");
+			// Тот же дефект у L3 при g_sprint_toggle=on: инъекция уже поставила mcSprint
+			c = false; lc = false; sp = false; w = mcSprint;
+			CActor::StepGamepadPostureState(false, true, c, lc, sp, w);
+			check(sp && (w & mcSprint) != 0, "e1_2b_press_L3_with_injected_toggle_bit_enables_sprint");
+		}
+
+		// 3. E1.1 (4, 5): фильтр стика на лестнице (mcClimb)
+		u32 gpFlags = mcFwd | mcRStrafe;
+		CActor::EvaluateGamepadLadderStick(0.35f, 0.85f, vx, vz, gpFlags);
+		check(_abs(vx) < 1e-5f && _abs(vz - 0.85f) < 1e-5f && (gpFlags & (mcLStrafe | mcRStrafe)) == 0 && (gpFlags & mcFwd) != 0,
+		      "e1_1_ladder_climb_up_suppresses_lateral_drift");
+		gpFlags = mcBack | mcLStrafe;
+		CActor::EvaluateGamepadLadderStick(-0.30f, -0.80f, vx, vz, gpFlags);
+		check(_abs(vx) < 1e-5f && _abs(vz + 0.80f) < 1e-5f && (gpFlags & (mcLStrafe | mcRStrafe)) == 0 && (gpFlags & mcBack) != 0,
+		      "e1_1_ladder_climb_down_suppresses_lateral_drift");
+		gpFlags = mcRStrafe;
+		CActor::EvaluateGamepadLadderStick(0.90f, 0.20f, vx, vz, gpFlags);
+		check(_abs(vx - 0.90f) < 1e-5f && _abs(vz - 0.20f) < 1e-5f,
+		      "e1_1_ladder_lateral_push_preserved_for_depart");
+
+		// 4. E1.1 (3): предикат удержания freelook R3
+		CGamepadContextDispatcher& disp = CGamepadContextDispatcher::Instance();
+		const bool savedFl = disp.IsGamepadFreelookHeld();
+		disp.SetGamepadFreelookHeldForTest(true);
+		check(disp.IsGamepadFreelookHeld(), "e1_1_freelook_r3_hold_predicate_true");
+		disp.SetGamepadFreelookHeldForTest(false);
+		check(!disp.IsGamepadFreelookHeld(), "e1_1_freelook_r3_hold_predicate_false");
+		disp.SetGamepadFreelookHeldForTest(savedFl);
+
+		Msg("* [Gamepad] gp_move_state selftest: %s (passed=%u failed=%u)",
+		    (failed == 0) ? "PASS" : "FAIL", passed, failed);
+		return failed == 0;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (args && args[0] && 0 == _stricmp(args, "selftest"))
+		{
+			RunSelfTest();
+			return;
+		}
+
+		CActor* pActor = Actor();
+		if (!pActor)
+		{
+			Msg("* [Gamepad] gp_move_state: no active CActor (use 'gp_move_state selftest' for offline verification)");
+			return;
+		}
+
+		const u32 mstateWf = pActor->get_state_wishful();
+		const u32 mstateRl = pActor->get_state();
+		CPHMovementControl* mctrl = pActor->character_physics_support() ? pActor->character_physics_support()->movement() : nullptr;
+		const DWORD boxId = mctrl ? mctrl->BoxID() : 0;
+		const CPHMovementControl::EEnvironment env = mctrl ? mctrl->Environment() : CPHMovementControl::peOnGround;
+		const int elevState = (mctrl && mctrl->ElevatorState()) ? static_cast<int>(mctrl->ElevatorState()->State()) : -1;
+		const float velActual = mctrl ? mctrl->GetVelocityActual() : 0.f;
+
+		const float gx = pActor->m_vGamepadMove.x;
+		const float gy = pActor->m_vGamepadMove.y;
+		const float gpMag = pActor->m_vGamepadMove.magnitude();
+		const float angleDeg = (gpMag > EPS_S) ? rad2deg(atan2f(gx, gy)) : 0.f;
+		float dummyVx = 0.f, dummyVz = 0.f;
+		const bool inCone60 = CActor::EvaluateGamepadSprintCone(gx, gy, gpMag, dummyVx, dummyVz);
+
+		Msg("* [Gamepad] gp_move_state: mode=%s box_id=%u env=%s elevator=%s(%d) vel=%.3f",
+		    DeterminePrimaryMode(pActor, mstateRl, boxId),
+		    boxId,
+		    GetEnvName(env),
+		    GetElevatorStateName(elevState),
+		    elevState,
+		    velActual);
+
+		Msg("* [Gamepad] gp_move_state gp: stick=(%.3f, %.3f) mag=%.3f angle_deg=%.1f in_cone60=%d gp_active=%d gp_sprint=%d gp_crouch=%d gp_low_crouch=%d gp_freelook=%d",
+		    gx,
+		    gy,
+		    gpMag,
+		    angleDeg,
+		    inCone60 ? 1 : 0,
+		    pActor->m_bGamepadMoveActive ? 1 : 0,
+		    pActor->IsGamepadSprintActive() ? 1 : 0,
+		    pActor->IsGamepadCrouchActive() ? 1 : 0,
+		    pActor->IsGamepadLowCrouchActive() ? 1 : 0,
+		    CGamepadContextDispatcher::Instance().IsGamepadFreelookHeld() ? 1 : 0);
+
+		Msg("* [Gamepad] gp_move_state flags: wishful=0x%04X real=0x%04X [fwd=%d back=%d lstr=%d rstr=%d crouch=%d accel=%d sprint=%d climb=%d jump=%d fall=%d lookout=%d] cam_freelook=%d zoom=%d",
+		    mstateWf,
+		    mstateRl,
+		    (mstateRl & mcFwd) ? 1 : 0,
+		    (mstateRl & mcBack) ? 1 : 0,
+		    (mstateRl & mcLStrafe) ? 1 : 0,
+		    (mstateRl & mcRStrafe) ? 1 : 0,
+		    (mstateRl & mcCrouch) ? 1 : 0,
+		    (mstateRl & mcAccel) ? 1 : 0,
+		    (mstateRl & mcSprint) ? 1 : 0,
+		    (mstateRl & mcClimb) ? 1 : 0,
+		    (mstateRl & mcJump) ? 1 : 0,
+		    (mstateRl & mcFall) ? 1 : 0,
+		    (mstateRl & mcLookout) ? 1 : 0,
+		    static_cast<int>(pActor->cam_freelook),
+		    pActor->IsZoomAimingMode() ? 1 : 0);
+
+		Msg("* [Gamepad] gp_move_state mult: walk_accel=%.3f run=%.3f run_back=%.3f walk_back=%.3f sprint=%.3f crouch=%.3f climb=%.3f strafe(walk=%.3f,run=%.3f,sprint=%.3f)",
+		    pActor->m_fWalkAccel,
+		    pActor->m_fRunFactor,
+		    pActor->m_fRunBackFactor,
+		    pActor->m_fWalkBackFactor,
+		    pActor->m_fSprintFactor,
+		    pActor->m_fCrouchFactor,
+		    pActor->m_fClimbFactor,
+		    pActor->m_fWalk_StrafeFactor,
+		    pActor->m_fRun_StrafeFactor,
+		    pActor->m_fSprint_StrafeFactor);
+
+		CActorCondition& cond = pActor->conditions();
+		Msg("* [Gamepad] gp_move_state cond: can_move=%d can_accel=%d can_run=%d can_sprint=%d can_jump=%d limping=%d cant_walk=%d cant_walk_weight=%d cant_sprint=%d weight=%.2f/%.2f(max=%.2f)",
+		    pActor->CanMove() ? 1 : 0,
+		    pActor->CanAccelerate() ? 1 : 0,
+		    pActor->CanRun() ? 1 : 0,
+		    pActor->CanSprint() ? 1 : 0,
+		    pActor->CanJump() ? 1 : 0,
+		    cond.IsLimping() ? 1 : 0,
+		    cond.IsCantWalk() ? 1 : 0,
+		    cond.IsCantWalkWeight() ? 1 : 0,
+		    cond.IsCantSprint() ? 1 : 0,
+		    pActor->inventory().TotalWeight(),
+		    pActor->MaxWalkWeight(),
+		    pActor->MaxCarryWeight());
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+#include <limits>
+// E2.1 (6): консольная команда gp_weapon_state — курки (порог/гистерезис из профиля), ADS/наклон/крестовина,
+// привязки оружейных действий, состояние активного оружия; "gp_weapon_state selftest" — офлайн-проверка гистерезиса курков.
+class CCC_GamepadWeaponState : public IConsole_Command
+{
+public:
+	CCC_GamepadWeaponState(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	static bool CheckTrigger(LPCSTR name, const gpmath::TriggerConfig& cfg, u32& passed, u32& failed)
+	{
+		auto check = [&](LPCSTR what, bool ok) {
+			if (ok)
+				++passed;
+			else
+			{
+				++failed;
+				Msg("! [Gamepad] gp_weapon_state selftest FAIL: %s %s (press=%.3f release=%.3f)", name, what, cfg.press, cfg.release);
+			}
+		};
+		const float p = cfg.press;
+		const float r = cfg.release;
+		const float mid = (p + r) * 0.5f;
+		check("gap>=min", (p - r) >= gpmath::limits::kTriggerMinGap - 1e-4f);
+		check("below_press_stays_up", !gpmath::UpdateTriggerButton(cfg, false, p - 0.01f));
+		check("at_press_goes_down", gpmath::UpdateTriggerButton(cfg, false, p));
+		check("mid_keeps_down", gpmath::UpdateTriggerButton(cfg, true, mid));
+		check("mid_keeps_up", !gpmath::UpdateTriggerButton(cfg, false, mid));
+		check("at_release_goes_up", !gpmath::UpdateTriggerButton(cfg, true, r));
+		check("full_pull_down", gpmath::UpdateTriggerButton(cfg, false, 1.0f));
+		check("zero_up", !gpmath::UpdateTriggerButton(cfg, true, 0.0f));
+		check("nan_safe_up", !gpmath::UpdateTriggerButton(cfg, false, std::numeric_limits<float>::quiet_NaN()));
+		return failed == 0;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (args && args[0] && 0 == _stricmp(args, "selftest"))
+		{
+			u32 passed = 0, failed = 0;
+			const gpmath::CalibrationProfile& prof = gpmath::GetCalibrationProfile();
+			CheckTrigger("left_trigger", prof.left_trigger, passed, failed);
+			CheckTrigger("right_trigger", prof.right_trigger, passed, failed);
+			gpmath::TriggerConfig def;
+			CheckTrigger("default_trigger", def, passed, failed);
+			Msg("* [Gamepad] gp_weapon_state selftest: %s (passed=%u failed=%u)", failed == 0 ? "PASS" : "FAIL", passed, failed);
+			return;
+		}
+		CGamepadContextDispatcher::Instance().LogWeaponState();
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// E5.1 (D13, D14, D43, D45): консольная команда gp_wheel [state|selftest|mode <slowmo|pause|realtime|cycle>]
+class CCC_GamepadWheel : public IConsole_Command
+{
+public:
+	CCC_GamepadWheel(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		string64 arg1 = "";
+		const int n = (args && args[0]) ? sscanf(args, "%63s %63s", subcmd, arg1) : 0;
+		auto& disp = CGamepadContextDispatcher::Instance();
+
+		if (n <= 0 || 0 == _stricmp(subcmd, "state") || 0 == _stricmp(subcmd, "status"))
+		{
+			disp.LogWheelState();
+		}
+		else if (0 == _stricmp(subcmd, "selftest"))
+		{
+			disp.RunWheelSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "mode"))
+		{
+			if (n < 2 || 0 == _stricmp(arg1, "cycle"))
+			{
+				LPCSTR cur = disp.GetWheelTimeMode();
+				LPCSTR nextMode = "slowmo";
+				if (0 == _stricmp(cur, "slowmo"))
+					nextMode = "pause";
+				else if (0 == _stricmp(cur, "pause"))
+					nextMode = "realtime";
+				disp.SetWheelTimeMode(nextMode);
+			}
+			else
+			{
+				disp.SetWheelTimeMode(arg1);
+			}
+			Msg("* [Gamepad] gp_wheel mode=%s", disp.GetWheelTimeMode());
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_wheel subcommand \"%s\". Expected: [state|selftest|mode <slowmo|pause|realtime|cycle>]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// E5.2 (D37, D45): gp_wheel_set <вкладка> <слот 1..8> <item:секция|slot:N|act:id|comp:N|det:секция|empty>
+// и gp_wheel_set dump | reset. Вся логика — в gp_wheel.console_set (Lua), результат пишется в лог.
+class CCC_GamepadWheelSet : public IConsole_Command
+{
+public:
+	CCC_GamepadWheelSet(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		if (!g_ai_space)
+		{
+			Msg("! [Gamepad] gp_wheel_set: Lua unavailable (no level)");
+			return;
+		}
+		::luabind::functor<LPCSTR> fn;
+		if (!ai().script_engine().functor("gp_wheel.console_set", fn))
+		{
+			Msg("! [Gamepad] gp_wheel_set: gp_wheel.console_set missing");
+			return;
+		}
+		try
+		{
+			LPCSTR r = fn(args ? args : "");
+			Msg("* [Gamepad] gp_wheel_set: %s", (r && r[0]) ? r : "nil");
+		}
+		catch (...)
+		{
+			Msg("! [Gamepad] gp_wheel_set: exception in gp_wheel.console_set");
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+// FG.1 (D59): консольная команда gp_cursor [status|selftest] — стилизованный курсор геймпада, автозадержка (магнит), скролл и крестовина
+class CCC_GamepadCursor : public IConsole_Command
+{
+public:
+	CCC_GamepadCursor(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		const int n = (args && args[0]) ? sscanf(args, "%63s", subcmd) : 0;
+		auto& disp = CGamepadContextDispatcher::Instance();
+
+		if (n <= 0 || 0 == _stricmp(subcmd, "status") || 0 == _stricmp(subcmd, "state"))
+		{
+			disp.LogCursorState();
+		}
+		else if (0 == _stricmp(subcmd, "selftest"))
+		{
+			disp.RunCursorSelfTest();
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_cursor subcommand \"%s\". Expected: [status|selftest]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+#include "GamepadOnScreenKeyboard.h"
+
+// F5.1 (D51): консольная команда gp_osk [status|selftest|open|commit|cancel] — экранная клавиатура RU/EN, регистр, шаблоны, Windows-1251
+class CCC_GamepadOsk : public IConsole_Command
+{
+public:
+	CCC_GamepadOsk(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		string64 subcmd = "";
+		const int n = (args && args[0]) ? sscanf(args, "%63s", subcmd) : 0;
+		auto& osk = CGamepadOnScreenKeyboardUI::Instance();
+
+		if (n <= 0 || 0 == _stricmp(subcmd, "status") || 0 == _stricmp(subcmd, "state"))
+		{
+			osk.LogStatus();
+		}
+		else if (0 == _stricmp(subcmd, "selftest"))
+		{
+			osk.RunSelfTest();
+		}
+		else if (0 == _stricmp(subcmd, "open"))
+		{
+			if (!osk.TryOpenForActiveDialog("console_gp_osk_open"))
+			{
+				Msg("! [Gamepad] gp_osk open: no active CUICustomEdit found in current dialog");
+			}
+		}
+		else if (0 == _stricmp(subcmd, "commit"))
+		{
+			osk.CloseCommit("console_gp_osk_commit");
+		}
+		else if (0 == _stricmp(subcmd, "cancel") || 0 == _stricmp(subcmd, "close"))
+		{
+			osk.CloseCancel("console_gp_osk_cancel");
+		}
+		else
+		{
+			Msg("! [Gamepad] Unknown gp_osk subcommand \"%s\". Expected: [status|selftest|open|commit|cancel]", subcmd);
+		}
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+extern bool g_gp_synth_look_active;
+extern float g_gp_synth_look_rx;
+extern float g_gp_synth_look_ry;
+extern float g_gp_synth_look_time_left;
+extern float g_gp_synth_look_duration;
+extern float g_gp_synth_look_accum_yaw;
+extern float g_gp_synth_look_accum_pitch;
+extern u32 g_gp_synth_look_frames;
+
+class CCC_GamepadSynthLook : public IConsole_Command
+{
+public:
+	CCC_GamepadSynthLook(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		float rx = 0.f;
+		float ry = 0.f;
+		float sec = 0.f;
+		if (!args || !args[0] || sscanf(args, "%f %f %f", &rx, &ry, &sec) != 3 || sec <= 0.f || (_abs(rx) < EPS_S && _abs(ry) < EPS_S))
+		{
+			g_gp_synth_look_active = false;
+			g_gp_synth_look_rx = 0.f;
+			g_gp_synth_look_ry = 0.f;
+			g_gp_synth_look_time_left = 0.f;
+			g_gp_synth_look_duration = 0.f;
+			Msg("* [Gamepad] gp_synth_look: off");
+			return;
+		}
+		g_gp_synth_look_rx = clampr(rx, -1.f, 1.f);
+		g_gp_synth_look_ry = clampr(ry, -1.f, 1.f);
+		g_gp_synth_look_duration = clampr(sec, 0.001f, 600.f);
+		g_gp_synth_look_time_left = g_gp_synth_look_duration;
+		g_gp_synth_look_accum_yaw = 0.f;
+		g_gp_synth_look_accum_pitch = 0.f;
+		g_gp_synth_look_frames = 0;
+		g_gp_synth_look_active = true;
+		Msg("* [Gamepad] gp_synth_look start: rx=%.4f ry=%.4f sec=%.4f",
+			g_gp_synth_look_rx, g_gp_synth_look_ry, g_gp_synth_look_duration);
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
+class CCC_GamepadSynthMove : public IConsole_Command
+{
+public:
+	CCC_GamepadSynthMove(LPCSTR N) : IConsole_Command(N)
+	{
+		bEmptyArgsHandled = true;
+	}
+
+	virtual void Execute(LPCSTR args) override
+	{
+		float sx = 0.f;
+		float sy = 0.f;
+		if (!args || !args[0] || sscanf(args, "%f %f", &sx, &sy) != 2 || (_abs(sx) < EPS_S && _abs(sy) < EPS_S))
+		{
+			g_gp_synth_move_active = false;
+			g_gp_synth_move_x = 0.f;
+			g_gp_synth_move_y = 0.f;
+			Msg("* [Gamepad] gp_synth_move: off");
+			return;
+		}
+		g_gp_synth_move_active = true;
+		g_gp_synth_move_x = clampr(sx, -1.f, 1.f);
+		g_gp_synth_move_y = clampr(sy, -1.f, 1.f);
+		Msg("* [Gamepad] gp_synth_move: x=%.4f y=%.4f", g_gp_synth_move_x, g_gp_synth_move_y);
+	}
+
+	virtual void Save(IWriter* F) override
+	{
+		(void)F;
+	}
+};
+
 class CCC_GSCheckForUpdates : public IConsole_Command
 {
 public:
@@ -2886,6 +4372,7 @@ void CCC_RegisterCommands()
 		CMD3(CCC_Mask, "g_unlimitedammo", &psActorFlags, AF_UNLIMITEDAMMO);
 		CMD1(CCC_Script, "run_script");
 		CMD1(CCC_ScriptCommand, "run_string");
+		CMD1(CCC_GamepadMenuLayoutScan, "gp_menu_layout_scan");
 		//CMD3(CCC_Mask, "g_no_clip", &psActorFlags, AF_NO_CLIP);
 		CMD1(CCC_PHGravity, "ph_gravity");
 		CMD3(CCC_Mask, "log_missing_ini", &FS.m_Flags, FS.flPrintLTX);
@@ -3473,4 +4960,35 @@ void CCC_RegisterCommands()
     CMD1(CCC_Particle_TEST,     "g_ps_test");
     CMD4(CCC_Integer, "show_actor_body", &showActorBody, 0, 2);
     CMD4(CCC_Integer, "disable_actor_body_rotation_delay", &disableActorBodyRotationDelay, 0, 1);
+    CMD1(CCC_GamepadSynthMove, "gp_synth_move");
+    CMD1(CCC_GamepadSynthLook, "gp_synth_look");
+    CMD1(CCC_GamepadPausePush, "gp_pause_push");
+    CMD1(CCC_GamepadPausePop, "gp_pause_pop");
+    CMD1(CCC_GamepadPauseState, "gp_pause_state");
+    CMD1(CCC_GamepadTx, "gp_tx");
+    CMD3(CCC_Token, "gp_queue_consumable_anim", &g_gp_queue_consumable_anim, gp_queue_consumable_anim_tokens);
+    CMD1(CCC_GamepadFocusTest, "gp_focus_test");
+    CMD1(CCC_GamepadFocusDump, "gp_focus_dump");
+    CMD1(CCC_GamepadTxnDump, "gp_txn_dump"); // F4.1
+    CMD1(CCC_GamepadContext, "gp_ctx");
+    CMD1(CCC_GamepadCalib, "gp_calib");
+    CMD1(CCC_GamepadRemap, "gp_remap");
+    CMD1(CCC_GamepadBindReset, "gp_bind_reset");
+    CMD1(CCC_GamepadActionsUnreached, "gp_actions_unreached");
+    CMD1(CCC_GamepadMoveState, "gp_move_state");
+    CMD1(CCC_GamepadWeaponState, "gp_weapon_state");
+    CMD1(CCC_GamepadWheel, "gp_wheel");
+    CMD1(CCC_GamepadWheelSet, "gp_wheel_set"); // E5.2
+    CMD1(CCC_GamepadCursor, "gp_cursor"); // FG.1
+    CMD4(CCC_Float, "gp_cursor_size", &ps_gp_cursor_size, 0.5f, 3.0f); // FG.5c
+    CMD4(CCC_Float, "gp_cursor_speed", &ps_gp_cursor_speed, 0.4f, 2.5f); // CURSOR1
+    CMD4(CCC_Float, "gp_cursor_brightness", &ps_gp_cursor_brightness, 0.5f, 2.0f); // FG.5c
+    CMD4(CCC_Integer, "gp_inv_focus_frame", &ps_gp_inv_focus_frame, 0, 1); // INV-REWORK-1: рамка вместо курсора и прыжки левого стика в инвентаре
+    CMD4(CCC_Integer, "gp_pda_eye_mode", &ps_gp_pda_eye_mode, 0, 1); // PDA1-E: 0 = квадрат по высоте, 1 = ClientToScreenScaled
+    CMD4(CCC_Integer, "gp_pda_reticle_shape", &ps_gp_pda_reticle_shape, 0, 2); // FIX-LIVE2 п.8: 0 = квадрат, 1 = круг, 2 = крест
+    CMD4(CCC_Integer, "gp_pda_reticle_size", &ps_gp_pda_reticle_size, 20, 64); // FIX-LIVE3 п.13: размер метки карты КПК
+    CMD1(CCC_GamepadOsk, "gp_osk"); // F5.1
+    CMD4(CCC_Integer, "gp_osk_enabled", &ps_gp_osk_enabled, 0, 1); // FIX-LIVE8 I-06
+    CMD4(CCC_Float, "gp_x_target_angle", &ps_gp_x_target_angle, 0.f, 30.f); // E2.2d: радиус подсказок для X, градусы
+    gpaa::RegisterConsoleCommands(); // E4.1
 }

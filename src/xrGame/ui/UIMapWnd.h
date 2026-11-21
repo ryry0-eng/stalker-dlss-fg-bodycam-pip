@@ -105,6 +105,14 @@ public:
 	void MoveScrollH(float dx);
 	void ActivatePropertiesBox(CUIWindow* w);
 	void ActivatePropertiesBox(const xr_vector<CMapSpot*>& spots);
+	CUIPropertiesBox* GetPropertiesBox() const { return m_UIPropertiesBox; }
+	bool CloseGamepadPropertiesBox();
+	void GatherGamepadMapSpotTargets(xr_vector<Frect>& outRects) const;
+	CMapSpot* FindGamepadSpotUnderCursor(float radius = -1.0f) const;
+	CMapSpot* FindGamepadSpotNear(const Fvector2& p, float radius, Fvector2* outCenter) const;
+	void GamepadZoomSmooth(float factor);
+	bool HandleGamepadContextMenuOrCenter(bool bForceContextMenu, Fvector2* outSnapPos);
+	bool GetGamepadQuickPawTarget(u16& outObjId, Fvector& outWorldPos, u32& outLvid, u32& outGvid, shared_str& outLevelName);
 
 private:
 	void GatherSpotsUnderCursor(CMapSpot* clicked, xr_vector<CMapSpot*>& out);
@@ -144,7 +152,7 @@ public:
 	void DrawHint();
 
 
-	void MoveMap(Fvector2 const& pos_delta);
+	void MoveMap(Fvector2 const& pos_delta, bool keepHint = false);
 	float GetZoom() { return m_currentZoom; }
 	void SetZoom(float value);
 

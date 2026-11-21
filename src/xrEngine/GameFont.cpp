@@ -169,6 +169,7 @@ CGameFont::CGameFont(LPCSTR section, u32 flags)
 	nNumChars = 0x100;
 	TCMap = NULL;
 
+	m_gp_section = section; // INV-REWORK-24
 	Initialize(pSettings->r_string(section, "shader"), GetFontTextureName(section));
 	if (pSettings->line_exist(section, "size"))
 	{
@@ -197,6 +198,7 @@ void CGameFont::Initialize(LPCSTR cShader, LPCSTR cTextureName)
 	string_path cTexture;
 
 	resolve_font_texture(cTextureName, cTexture);
+	m_gp_texture = cTexture; // INV-REWORK-24
 
 	uFlags &= ~fsValid;
 	vTS.set(1.f, 1.f); // обязательно !!!

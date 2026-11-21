@@ -46,6 +46,9 @@ public:
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 
+	CUIScrollView* GetTaskList() const { return m_list; }
+	CUI3tButton* GetCloseBtn() const { return m_bt_close; }
+
 protected:
 	void xr_stdcall OnBtnClose(CUIWindow* w, void* d);
 	bool xr_stdcall SortingLessFunction(CUIWindow* left, CUIWindow* right);
@@ -85,6 +88,9 @@ public:
 	virtual void Update();
 	virtual void SendMessage(CUIWindow* pWnd, s16 msg, void* pData);
 	virtual bool OnMouseAction(float x, float y, EUIMessages mouse_action);
+	CUI3tButton* GetNameBtn() const { return m_name; }
+	CUI3tButton* GetFocusBtn() const { return m_bt_focus; }
+	CGameTask* GetTask() const { return m_task; } // FIX-LIVE3 p.21/22: gamepad task list step/pick
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 

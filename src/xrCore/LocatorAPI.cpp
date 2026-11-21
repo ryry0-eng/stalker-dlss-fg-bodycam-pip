@@ -9,8 +9,7 @@
 #include <direct.h>
 #include <fcntl.h>
 #include <sys\stat.h>
-#define _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING
-#include <experimental\filesystem>
+#include <filesystem>
 #pragma warning(default:4995)
 
 #include "FS_internal.h"
@@ -35,7 +34,7 @@ CLocatorAPI* xr_FS = NULL;
 # define FSLTX "fsgame.ltx"
 #endif
 
-std::experimental::filesystem::path fsRoot;
+std::filesystem::path fsRoot;
 
 struct _open_file
 {
@@ -812,19 +811,21 @@ static void searchForFsltx(const char* fs_name, string_path& fsltxPath)
 		realFsltxName = FSLTX;
 	}
 
-	//try in working dir
-	if (std::experimental::filesystem::exists(realFsltxName))
+	// CR1-01: Release builds disable _CPPUNWIND; pass error_code so restricted parent dirs do not throw.
+	std::error_code fsEc;
+	if (std::filesystem::exists(realFsltxName, fsEc) && !fsEc)
 	{
 		xr_strcpy(fsltxPath, realFsltxName);
 		return;
 	}
 
-	auto tryPathFunc = [realFsltxName](std::experimental::filesystem::path possibleLocationFsltx,
+	auto tryPathFunc = [realFsltxName](std::filesystem::path possibleLocationFsltx,
 	                                   string_path& fsltxPath) -> bool
 	{
 		possibleLocationFsltx.append(realFsltxName);
 
-		if (std::experimental::filesystem::exists(possibleLocationFsltx))
+		std::error_code ec;
+		if (std::filesystem::exists(possibleLocationFsltx, ec) && !ec)
 		{
 			xr_strcpy(fsltxPath, possibleLocationFsltx.generic_string().c_str());
 			return true;
@@ -839,7 +840,7 @@ static void searchForFsltx(const char* fs_name, string_path& fsltxPath)
 	if (tryPathFunc(Core.ApplicationPath, fsltxPath)) return;
 
 	//parent directory again
-	std::experimental::filesystem::path test_path;
+	std::filesystem::path test_path;
 	test_path.assign(Core.ApplicationPath);
 	test_path.append("../");
 
@@ -855,7 +856,10 @@ IReader* CLocatorAPI::setup_fs_ltx(LPCSTR fs_name)
 	              make_string("Cannot find fsltx file: \"%s\"\nCheck your working directory", fs_name));
 	xr_strlwr(fs_path);
 	fsRoot = fs_path;
-	fsRoot = std::experimental::filesystem::absolute(fsRoot);
+	std::error_code absEc;
+	const std::filesystem::path absRoot = std::filesystem::absolute(fsRoot, absEc);
+	if (!absEc && !absRoot.empty())
+		fsRoot = absRoot;
 	fsRoot = fsRoot.parent_path();
 
 	Msg("using fs-ltx %s", fs_path);

@@ -40,6 +40,7 @@
 #include "UIPropertiesBox.h"
 #include "UIMainIngameWnd.h"
 #include "../Trade.h"
+#include "../../xrEngine/GamepadGlyphs.h"
 
 void CUIActorMenu::SetActor(CInventoryOwner* io)
 {
@@ -256,6 +257,15 @@ void CUIActorMenu::Update()
 	if (m_ItemInfo->CurrentItem())
 		m_ItemInfo->Update();
 	m_hint_wnd->Update();
+
+	// D5.1: live refresh of quick-slot button labels when input source, bindings, or glyph style changes
+	static u32 s_lastMenuPromptRev = 0;
+	const u32 curPromptRev = CGamepadGlyphManager::Instance().GetPromptRevision();
+	if (s_lastMenuPromptRev != curPromptRev)
+	{
+		s_lastMenuPromptRev = curPromptRev;
+		UpdateButtonsLayout();
+	}
 }
 
 bool CUIActorMenu::StopAnyMove() // true = актёр не идёт при открытом меню

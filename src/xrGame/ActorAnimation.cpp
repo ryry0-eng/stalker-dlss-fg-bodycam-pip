@@ -722,6 +722,22 @@ void CActor::g_SetAnimation(u32 mstate_rl)
 		CStepManager::on_animation_start(M_legs, m_current_legs_blend);
 	}
 
+	// FIX-LIVE1 п.1: темп ног (и шагов CStepManager, идущих от времени blend) следует за отклонением левого стика
+	// MT-MAY: скорость blend трогаем только пока стик отклонён не полностью (k < 1) и один раз возвращаем
+	// родную скорость после этого; с клавиатурой/полным стиком код не выполняется — поведение как в оригинале.
+	if (m_current_legs_blend && this == Actor())
+	{
+		extern float g_gp_move_anim_k;
+		static bool s_gp_legs_scaled = false;
+		const bool scale = (mstate_real & mcAnyMove) && g_gp_move_anim_k < 1.f;
+		if (scale || s_gp_legs_scaled)
+		{
+			if (CMotionDef* md = smart_cast<IKinematicsAnimated*>(Visual())->LL_GetMotionDef(m_current_legs))
+				m_current_legs_blend->speed = md->Speed() * (scale ? g_gp_move_anim_k : 1.f);
+			s_gp_legs_scaled = scale;
+		}
+	}
+
 
 #ifdef DEBUG
 	if(bDebug && g_ShowAnimationInfo)

@@ -71,6 +71,11 @@ public:
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 
+	CUIScrollView* GetAchievementsList() const { return m_achievements; }
+	CUIScrollView* GetCocRankingList() const { return m_coc_ranking; }
+	CUIScrollView* GetCocRankingActorView() const { return m_coc_ranking_actor_view; }
+	CUIRankingsCoC* GetCocRankingActor() const { return m_coc_ranking_actor; }
+
 protected:
 	void add_achievement(CUIXml& xml, shared_str const& faction_id);
 	void get_statistic();

@@ -12,6 +12,8 @@
 #include "../xrphysics/MathUtils.h"
 #include "player_hud.h"
 #include "../build_config_defines.h"
+#include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
 
 #ifdef DEBUG
 #	include "phdebug.h"
@@ -154,6 +156,13 @@ void CWeaponMagazinedWGrenade::OnShot()
 		if (object)
 			object->callback(GameObject::eOnWeaponFired)(object->lua_game_object(), this->lua_game_object(), iAmmoElapsed);
 #endif
+
+		// E2.1 (2): выстрел подствольника тоже идёт в канал recoil микшера D5.2 (курок RT по D40, иначе корпус).
+		// Ветка обычного выстрела вызывает канал в CWeaponMagazined::OnShot.
+		if (ParentIsActor() && pInput && pInput->GetGamepadHaptics())
+		{
+			pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Recoil, 1.3f, 0, "WeaponMagazinedWGrenade::OnShot_GL");
+		}
 	}
 	else
 		inherited::OnShot();

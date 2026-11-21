@@ -39,6 +39,8 @@
 #include "../alife_registry_wrappers.h"
 
 #include "../string_table.h"
+#include "../../xrEngine/xr_input.h"
+#include "../../xrEngine/GamepadGlyphs.h"
 
 #ifdef DEBUG
 #	include "../attachable_item.h"
@@ -410,12 +412,21 @@ void CUIMainIngameWnd::RenderQuickInfos()
 		return;
 
 	static CGameObject* pObject = NULL;
+	static u32 s_lastPromptRev = 0;
+	const u32 curPromptRev = CGamepadGlyphManager::Instance().GetPromptRevision();
+	const bool promptRevChanged = (s_lastPromptRev != curPromptRev);
+	if (promptRevChanged)
+	{
+		s_lastPromptRev = curPromptRev;
+		UpdateQuickSlots();
+	}
+
 	LPCSTR actor_action = pActor->GetDefaultActionForObject();
 	UIStaticQuickHelp->Show(NULL != actor_action);
 
 	if (NULL != actor_action)
 	{
-		if (stricmp(actor_action, UIStaticQuickHelp->GetText()))
+		if (promptRevChanged || stricmp(actor_action, UIStaticQuickHelp->GetText()))
 			UIStaticQuickHelp->SetTextST(actor_action);
 	}
 
@@ -831,29 +842,41 @@ void CUIMainIngameWnd::UpdateMainIndicators()
 
 void CUIMainIngameWnd::UpdateQuickSlots()
 {
+	auto formatSlotBadge = [](LPCSTR src, string32& dst)
+	{
+		if (pInput && pInput->IsGamepadActiveSource())
+		{
+			xr_strcpy(dst, sizeof(dst), src ? src : "");
+			char* comma = strchr(dst, ',');
+			if (comma)
+			{
+				while (comma > dst && *(comma - 1) == ' ')
+					--comma;
+				*comma = '\0';
+			}
+			return;
+		}
+		dst[0] = '\0';
+		strncpy_s(dst, sizeof(dst), src ? src : "", 3);
+		if (xr_strlen(dst) >= 3 && dst[2] == ',')
+			dst[1] = '\0';
+	};
+
 	string32 tmp;
 	LPCSTR str = CStringTable().translate("quick_use_str_1").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlotText1->SetTextST(tmp);
 
 	str = CStringTable().translate("quick_use_str_2").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlotText2->SetTextST(tmp);
 
 	str = CStringTable().translate("quick_use_str_3").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlotText3->SetTextST(tmp);
 
 	str = CStringTable().translate("quick_use_str_4").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlotText4->SetTextST(tmp);
 
 

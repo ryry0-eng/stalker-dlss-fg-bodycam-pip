@@ -93,6 +93,7 @@ public:
 	virtual void stop_emitters();
 	virtual void restart_emitters();
 	virtual int pause_emitters(bool val);
+	virtual int pause_emitters_count() const override { return m_iPauseCounter; }
 
 	virtual void play(ref_sound& S, CObject* O, u32 flags = 0, float delay = 0.f);
 	virtual void play_at_pos(ref_sound& S, CObject* O, const Fvector& pos, u32 flags = 0, float delay = 0.f);

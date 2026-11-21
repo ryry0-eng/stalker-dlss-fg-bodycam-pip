@@ -23,6 +23,7 @@
 #include "UIProgressBar.h"
 #include "ui_base.h"
 #include "../string_table.h"
+#include "../../xrEngine/xr_input.h"
 
 CUIActorMenu::CUIActorMenu()
 {
@@ -388,29 +389,41 @@ void CUIActorMenu::InitCallbacks()
 
 void CUIActorMenu::UpdateButtonsLayout()
 {
+	auto formatSlotBadge = [](LPCSTR src, string32& dst)
+	{
+		if (pInput && pInput->IsGamepadActiveSource())
+		{
+			xr_strcpy(dst, sizeof(dst), src ? src : "");
+			char* comma = strchr(dst, ',');
+			if (comma)
+			{
+				while (comma > dst && *(comma - 1) == ' ')
+					--comma;
+				*comma = '\0';
+			}
+			return;
+		}
+		dst[0] = '\0';
+		strncpy_s(dst, sizeof(dst), src ? src : "", 3);
+		if (xr_strlen(dst) >= 3 && dst[2] == ',')
+			dst[1] = '\0';
+	};
+
 	string32 tmp;
 	LPCSTR str = CStringTable().translate("quick_use_str_1").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlot1->SetTextST(tmp);
 
 	str = CStringTable().translate("quick_use_str_2").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlot2->SetTextST(tmp);
 
 	str = CStringTable().translate("quick_use_str_3").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlot3->SetTextST(tmp);
 
 	str = CStringTable().translate("quick_use_str_4").c_str();
-	strncpy_s(tmp, sizeof(tmp), str, 3);
-	if (tmp[2] == ',')
-		tmp[1] = '\0';
+	formatSlotBadge(str, tmp);
 	m_QuickSlot4->SetTextST(tmp);
 
 	UpdateConditionProgressBars();

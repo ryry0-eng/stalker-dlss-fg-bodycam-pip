@@ -431,7 +431,8 @@ void CUIPdaWnd::DrawHint()
 	}
 	else if (m_sActiveSection == "eptRanking")
 	{
-		pUIRankingWnd->DrawHint();
+		if (!m_bGamepadHintsHidden)
+			pUIRankingWnd->DrawHint();
 	}
 	else if (m_sActiveSection == "eptLogs")
 	{
@@ -496,7 +497,18 @@ void RearrangeTabButtons(CUITabControl* pTab)
 void CUIPdaWnd::Enable(bool status)
 {
 	if (status)
+	{
 		ResetCursor();
+		if (IsShown() && CurrentGameUI())
+		{
+			if (CurrentGameUI()->TopInputReceiver() != this)
+			{
+				CurrentGameUI()->SetMainInputReceiver(this, true);
+				CurrentGameUI()->SetMainInputReceiver(this, false);
+			}
+			GetUICursor().Show();
+		}
+	}
 	else
 	{
 		g_player_hud->reset_thumb(false);
@@ -531,6 +543,338 @@ bool CUIPdaWnd::OnKeyboardAction(int dik, EUIMessages keyboard_action)
 			return inherited::OnKeyboardAction(dik, keyboard_action);
 
 		return pda->Action(get_binded_action(dik), keyboard_action == WINDOW_KEY_PRESSED ? CMD_START : CMD_STOP);
+	}
+
+	return false;
+}
+
+#include "UIMapWnd.h"
+#include "UIPropertiesBox.h"
+
+static void PushPdaShownRect(CUIWindow* w, xr_vector<Frect>& outRects)
+{
+	if (!w || !w->IsShown())
+		return;
+	Frect r;
+	w->GetAbsoluteRect(r);
+	if (r.width() > 2.0f && r.height() > 2.0f)
+		outRects.push_back(r);
+}
+
+bool CUIPdaWnd::CycleActiveTab(int delta)
+{
+	if (delta == 0 || !UITabControl || !UITabControl->IsShown())
+		return false;
+
+	TABS_VECTOR* tabs = UITabControl->GetButtonsVector();
+	if (!tabs || tabs->empty())
+		return false;
+
+	const int count = static_cast<int>(tabs->size());
+	const shared_str curId = UITabControl->GetActiveId();
+	int curIdx = 0;
+	for (int i = 0; i < count; ++i)
+	{
+		if ((*tabs)[i] && (*tabs)[i]->m_btn_id == curId)
+		{
+			curIdx = i;
+			break;
+		}
+	}
+
+	const int nextIdx = ((curIdx + delta) % count + count) % count;
+	CUITabButton* nextBtn = (*tabs)[nextIdx];
+	if (!nextBtn)
+		return false;
+
+	UITabControl->SetActiveTab(nextBtn->m_btn_id);
+	return true;
+}
+
+bool CUIPdaWnd::CloseTopOverlay()
+{
+	if (ai().get_alife())
+	{
+		::luabind::functor<bool> fnPawClose;
+		if (ai().script_engine().functor("gp_pda.close_paw_modal_if_open", fnPawClose))
+		{
+			try
+			{
+				if (fnPawClose())
+					return true;
+			}
+			catch (...)
+			{
+			}
+		}
+	}
+
+	if (pUITaskWnd && pUITaskWnd->IsShown() && pUITaskWnd->CloseTopTaskOverlay())
+		return true;
+
+	if (ai().get_alife())
+	{
+		::luabind::functor<bool> fnNpcBack;
+		if (ai().script_engine().functor("gp_pda.handle_npc_pda_back", fnNpcBack))
+		{
+			try
+			{
+				if (fnNpcBack())
+					return true;
+			}
+			catch (...)
+			{
+			}
+		}
+	}
+
+	return false;
+}
+
+void CUIPdaWnd::ClosePdaFromGamepad()
+{
+	if (psActorFlags.test(AF_3D_PDA) && Actor())
+	{
+		CPda* pda = smart_cast<CPda*>(Actor()->inventory().ActiveItem());
+		if (pda)
+		{
+			pda->Action(kQUIT, CMD_START);
+			return;
+		}
+	}
+	HideDialog();
+}
+
+void CUIPdaWnd::GatherGamepadTargets(xr_vector<Frect>& outRects) const
+{
+	// If map context menu (CUIPropertiesBox) is open on eptTasks, confine targets to its items
+	if (pUITaskWnd && pUITaskWnd->IsShown() && pUITaskWnd->GetMapWnd() &&
+		pUITaskWnd->GetMapWnd()->GetPropertiesBox() && pUITaskWnd->GetMapWnd()->GetPropertiesBox()->IsShown())
+	{
+		pUITaskWnd->GatherGamepadTaskTargets(outRects);
+		return;
+	}
+
+	if (UITabControl && UITabControl->IsShown())
+	{
+		TABS_VECTOR* tabs = UITabControl->GetButtonsVector();
+		if (tabs)
+		{
+			for (auto it = tabs->begin(); it != tabs->end(); ++it)
+				PushPdaShownRect(*it, outRects);
+		}
+	}
+	PushPdaShownRect(m_btn_close, outRects);
+
+	if (pUITaskWnd && pUITaskWnd->IsShown())
+	{
+		pUITaskWnd->GatherGamepadTaskTargets(outRects);
+	}
+	else if (pUILogsWnd && pUILogsWnd->IsShown())
+	{
+		PushPdaShownRect(pUILogsWnd->GetFilterNews(), outRects);
+		PushPdaShownRect(pUILogsWnd->GetFilterTalk(), outRects);
+		PushPdaShownRect(pUILogsWnd->GetPrevPeriodBtn(), outRects);
+		PushPdaShownRect(pUILogsWnd->GetNextPeriodBtn(), outRects);
+	}
+}
+
+bool CUIPdaWnd::HandleGamepadRightStick(float curX, float curY, int wheelDir)
+{
+	if (wheelDir == 0)
+		return false;
+
+	if (pUITaskWnd && pUITaskWnd->IsShown())
+		return pUITaskWnd->HandleGamepadRightStick(curX, curY, wheelDir);
+
+	const EUIMessages msg = (wheelDir > 0) ? WINDOW_MOUSE_WHEEL_UP : WINDOW_MOUSE_WHEEL_DOWN;
+
+	if (pUILogsWnd && pUILogsWnd->IsShown())
+	{
+		CUIScrollView* sv = pUILogsWnd->GetLogsList();
+		if (sv && sv->IsShown())
+		{
+			Frect r;
+			sv->GetAbsoluteRect(r);
+			sv->OnMouseAction(curX - r.x1, curY - r.y1, msg);
+			return true;
+		}
+	}
+
+	if (pUIRankingWnd && pUIRankingWnd->IsShown())
+	{
+		CUIScrollView* svAch = pUIRankingWnd->GetAchievementsList();
+		CUIScrollView* svCoc = pUIRankingWnd->GetCocRankingList();
+		if (svAch && svAch->IsShown())
+		{
+			Frect r;
+			svAch->GetAbsoluteRect(r);
+			if (r.in(curX, curY))
+			{
+				svAch->OnMouseAction(curX - r.x1, curY - r.y1, msg);
+				return true;
+			}
+		}
+		if (svCoc && svCoc->IsShown())
+		{
+			Frect r;
+			svCoc->GetAbsoluteRect(r);
+			svCoc->OnMouseAction(curX - r.x1, curY - r.y1, msg);
+			return true;
+		}
+	}
+
+	bool handledByLua = false;
+	if (ai().get_alife())
+	{
+		::luabind::functor<bool> fnScroll;
+		if (ai().script_engine().functor("gp_pda.on_pda_right_stick_scroll", fnScroll))
+		{
+			try
+			{
+				handledByLua = fnScroll(curX, curY, wheelDir);
+			}
+			catch (...)
+			{
+			}
+		}
+	}
+
+	if (!handledByLua && m_pActiveDialog && m_pActiveDialog->IsShown())
+	{
+		Frect r;
+		m_pActiveDialog->GetAbsoluteRect(r);
+		m_pActiveDialog->OnMouseAction(curX - r.x1, curY - r.y1, msg);
+		return true;
+	}
+
+	return handledByLua;
+}
+
+void CUIPdaWnd::StepGamepadMapPan(float stickX, float stickY, bool bModifierHeld, float curX, float curY, u32 dtMs)
+{
+	if (pUITaskWnd && pUITaskWnd->IsShown())
+		pUITaskWnd->StepGamepadMapPan(stickX, stickY, bModifierHeld, curX, curY, dtMs);
+}
+
+bool CUIPdaWnd::HandleGamepadButtonX(bool bModifierHeld, Fvector2* outSnapPos)
+{
+	if (pUITaskWnd && pUITaskWnd->IsShown() && pUITaskWnd->GetMapWnd() && pUITaskWnd->GetMapWnd()->IsShown())
+	{
+		return pUITaskWnd->GetMapWnd()->HandleGamepadContextMenuOrCenter(bModifierHeld, outSnapPos);
+	}
+	return false;
+}
+
+bool CUIPdaWnd::HandleGamepadButtonY()
+{
+	if (!pUITaskWnd || !pUITaskWnd->IsShown() || !pUITaskWnd->GetMapWnd() || !pUITaskWnd->GetMapWnd()->IsShown())
+		return false;
+
+	u16 objId = u16(65535);
+	Fvector worldPos = { 0.0f, 0.0f, 0.0f };
+	u32 lvid = u32(-1);
+	u32 gvid = u32(-1);
+	shared_str levelName;
+
+	if (!pUITaskWnd->GetMapWnd()->GetGamepadQuickPawTarget(objId, worldPos, lvid, gvid, levelName))
+		return false;
+
+	if (ai().get_alife())
+	{
+		::luabind::functor<bool> fnPaw;
+		if (ai().script_engine().functor("gp_pda.on_map_quick_paw", fnPaw))
+		{
+			try
+			{
+				return fnPaw(objId, worldPos.x, worldPos.y, worldPos.z, lvid, gvid, levelName.c_str() ? levelName.c_str() : "");
+			}
+			catch (...)
+			{
+			}
+		}
+	}
+	return false;
+}
+
+bool CUIPdaWnd::HandleGamepadButtonView(Fvector2* outSnapPos)
+{
+	if (pUITaskWnd && pUITaskWnd->IsShown())
+	{
+		return pUITaskWnd->ToggleTaskListWndGamepad(outSnapPos);
+	}
+	return false;
+}
+
+#include "UIScrollView.h"
+#include "UISecondTaskWnd.h"
+#include "UIMapLegend.h"
+
+static bool ScrollPdaScrollViewAnalog(CUIScrollView* sv, float dy_ui)
+{
+	if (!sv || !sv->IsShown())
+		return false;
+	const int mn = sv->GetMinScrollPos();
+	const int mx = sv->GetMaxScrollPos();
+	if (mx <= mn)
+		return false;
+	static CUIScrollView* s_lastSv = nullptr;
+	static float s_acc = 0.0f;
+	const int cur = sv->GetCurrentScrollPos();
+	if (s_lastSv != sv || iFloor(s_acc + 0.5f) != cur)
+	{
+		s_lastSv = sv;
+		s_acc = static_cast<float>(cur);
+	}
+	s_acc = clampr(s_acc + dy_ui, static_cast<float>(mn), static_cast<float>(mx));
+	const int ip = iFloor(s_acc + 0.5f);
+	if (ip != cur)
+		sv->SetScrollPos(ip);
+	return true;
+}
+
+bool CUIPdaWnd::GpScrollAnalog(float dy_ui)
+{
+	if (_abs(dy_ui) <= EPS_S)
+		return false;
+
+	if (pUITaskWnd && pUITaskWnd->IsShown())
+	{
+		if (pUITaskWnd->GetMapLegendWnd() && pUITaskWnd->GetMapLegendWnd()->IsShown())
+			return ScrollPdaScrollViewAnalog(pUITaskWnd->GetMapLegendWnd()->GetList(), dy_ui);
+		if (pUITaskWnd->GetTaskListWnd() && pUITaskWnd->GetTaskListWnd()->IsShown())
+			return ScrollPdaScrollViewAnalog(pUITaskWnd->GetTaskListWnd()->GetTaskList(), dy_ui);
+		return false;
+	}
+
+	if (pUILogsWnd && pUILogsWnd->IsShown())
+	{
+		return ScrollPdaScrollViewAnalog(pUILogsWnd->GetLogsList(), dy_ui);
+	}
+
+	if (pUIRankingWnd && pUIRankingWnd->IsShown())
+	{
+		const Fvector2 cur = GetUICursor().GetCursorPosition();
+		CUIScrollView* svAch = pUIRankingWnd->GetAchievementsList();
+		CUIScrollView* svRank = pUIRankingWnd->GetCocRankingList();
+		if (svAch && svAch->IsShown())
+		{
+			Frect ar;
+			svAch->GetAbsoluteRect(ar);
+			if (ar.in(cur.x, cur.y))
+				return ScrollPdaScrollViewAnalog(svAch, dy_ui);
+		}
+		if (svRank && svRank->IsShown())
+		{
+			Frect rr;
+			svRank->GetAbsoluteRect(rr);
+			if (rr.in(cur.x, cur.y))
+				return ScrollPdaScrollViewAnalog(svRank, dy_ui);
+		}
+		if (svRank && svRank->IsShown())
+			return ScrollPdaScrollViewAnalog(svRank, dy_ui);
+		if (svAch && svAch->IsShown())
+			return ScrollPdaScrollViewAnalog(svAch, dy_ui);
 	}
 
 	return false;

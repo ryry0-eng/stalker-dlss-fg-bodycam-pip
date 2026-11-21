@@ -24,6 +24,11 @@ IC CSoundMemoryManager::CSoundMemoryManager(CCustomMonster* object, CAI_Stalker*
 #endif
 }
 
+IC bool CSoundMemoryManager::has_objects() const
+{
+	return (m_sounds != 0);
+}
+
 IC const CSoundMemoryManager::SOUNDS& CSoundMemoryManager::objects() const
 {
 	VERIFY(m_sounds);

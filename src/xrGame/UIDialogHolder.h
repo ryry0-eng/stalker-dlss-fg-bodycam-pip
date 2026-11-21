@@ -49,6 +49,7 @@ public:
 	//dialogs
 	void OnExternalHideIndicators();
 	CUIDialogWnd* TopInputReceiver();
+	CUIDialogWnd* PreviousInputReceiver(const CUIDialogWnd* ir) const;
 	void AddDialogToRender(CUIWindow* pDialog);
 	void RemoveDialogToRender(CUIWindow* pDialog);
     void SetMainInputReceiver(CUIDialogWnd* ir, bool _find_remove);

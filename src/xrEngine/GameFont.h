@@ -115,6 +115,9 @@ public:
 #ifdef DEBUG
     shared_str m_font_name;
 #endif
+	// INV-REWORK-24 hint x-ray: fonts.ltx section and resolved atlas (ui\ui_font_letter_18_1600)
+	shared_str m_gp_section;
+	shared_str m_gp_texture;
 };
 
 // Resolves which atlas key of `section` to load for the current Device.dwHeight.

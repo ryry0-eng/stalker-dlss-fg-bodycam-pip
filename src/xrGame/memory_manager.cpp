@@ -170,6 +170,8 @@ void CMemoryManager::update(float time_delta)
 		record_name, record_id, 0, record_stalker);
 
 	START_PROFILE("Memory Manager")
+		if (!m_visual || !m_visual->has_objects() || !m_sound || !m_sound->has_objects() || !m_hit || !m_hit->has_objects())
+			return;
 		{
 			CScopedLuaRecordPhase phase(ai().script_engine(), "ai_memory", "memory.visual.update",
 				record_name, record_id, 0, record_stalker);

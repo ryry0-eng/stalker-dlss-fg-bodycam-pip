@@ -29,6 +29,7 @@ protected:
 	float m_downIndent;
 
 	float m_vertInterval;
+	float m_gamepadEdgePadding = 0.0f;
 
 	Flags16 m_flags;
 	bool m_pad_drag_active;
@@ -77,6 +78,7 @@ public:
 	int GetMaxScrollPos();
 	int GetCurrentScrollPos();
 	void SetScrollPos(int value);
+	void SetGamepadEdgePadding(float padding);
 	void SetScrollBarProfile(LPCSTR profile);
 	IC bool NeedShowScrollBar(); // no comment
 	float GetHorizIndent(); // left + right indent

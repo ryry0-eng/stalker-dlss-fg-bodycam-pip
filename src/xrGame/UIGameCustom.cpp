@@ -38,6 +38,7 @@ struct predicate_find_stat
 CUIGameCustom::CUIGameCustom()
 {
 	MsgConfig = nullptr;
+	GpMsgConfig = nullptr;
 	ActorMenu = nullptr;
 	PdaMenu = nullptr;
 	Window = nullptr;
@@ -153,21 +154,38 @@ void CUIGameCustom::Render()
 StaticDrawableWrapper* CUIGameCustom::AddCustomStatic(const char* id, bool singleInstance)
 {
 	xrCriticalSectionGuard lock(m_customs_lock);
+	// MENU-FOCUS P16: the mod's ui_gp_toasts.xml wins over ui_custom_msgs.xml for the same id.
+	CUIXml* config = GpMsgConfig && GpMsgConfig->NavigateToNode(id, 0) ? GpMsgConfig : MsgConfig;
 	if (singleInstance)
 	{
 		auto it = std::find_if(CustomStatics.begin(), CustomStatics.end(), predicate_find_stat(id));
 		if (it != CustomStatics.end())
-			return *it;
+		{
+			// A repeated save restarts a fading message instead of letting the old one expire.
+			StaticDrawableWrapper* old = *it;
+			const float ttl = config->ReadAttribFlt(id, 0, "ttl", -1.0f);
+			if ((old->m_fadeIn > 0.0f || old->m_fadeOut > 0.0f) && ttl > 0.0f)
+			{
+				old->m_startTime = Device.fTimeGlobal;
+				old->m_endTime = Device.fTimeGlobal + ttl;
+			}
+			return old;
+		}
 	}
 	CUIXmlInit xmlInit;
 	CustomStatics.push_back(xr_new<StaticDrawableWrapper>());
 	StaticDrawableWrapper* sss = CustomStatics.back();
 	sss->m_static = xr_new<CUIStatic>();
 	sss->m_name = id;
-	xmlInit.InitStatic(*MsgConfig, id, 0, sss->m_static);
-	float ttl = MsgConfig->ReadAttribFlt(id, 0, "ttl", -1.0f);
+	xmlInit.InitStatic(*config, id, 0, sss->m_static);
+	float ttl = config->ReadAttribFlt(id, 0, "ttl", -1.0f);
 	if (ttl > 0.0f)
 		sss->m_endTime = Device.fTimeGlobal + ttl;
+	sss->m_startTime = Device.fTimeGlobal;
+	sss->m_fadeIn = config->ReadAttribFlt(id, 0, "fade_in", 0.0f);
+	sss->m_fadeOut = config->ReadAttribFlt(id, 0, "fade_out", 0.0f);
+	sss->m_baseTextureColor = sss->m_static->GetTextureColor();
+	sss->m_baseTextColor = sss->m_static->TextItemControl()->GetTextColor();
 	return sss;
 }
 
@@ -309,6 +327,7 @@ void CUIGameCustom::SetClGame(game_cl_GameState* gameState)
 void CUIGameCustom::UnLoad()
 {
 	xr_delete(MsgConfig);
+	xr_delete(GpMsgConfig);
 	xr_delete(ActorMenu);
 	xr_delete(PdaMenu);
 	xr_delete(Window);
@@ -340,6 +359,12 @@ void CUIGameCustom::Load()
 	R_ASSERT(!MsgConfig);
 	MsgConfig = xr_new<CUIXml>();
 	MsgConfig->Load(CONFIG_PATH, UI_PATH, "ui_custom_msgs.xml");
+	R_ASSERT(!GpMsgConfig);
+	if (FS.exist(CONFIG_PATH, "ui\\ui_gp_toasts.xml"))
+	{
+		GpMsgConfig = xr_new<CUIXml>();
+		GpMsgConfig->Load(CONFIG_PATH, UI_PATH, "ui_gp_toasts.xml");
+	}
 	R_ASSERT(!ActorMenu);
 	ActorMenu = xr_new<CUIActorMenu>();
 	R_ASSERT(!PdaMenu);
@@ -393,6 +418,11 @@ StaticDrawableWrapper::StaticDrawableWrapper()
 {
 	m_static = nullptr;
 	m_endTime = -1.0f;
+	m_startTime = 0.0f;
+	m_fadeIn = 0.0f;
+	m_fadeOut = 0.0f;
+	m_baseTextureColor = 0xFFFFFFFF;
+	m_baseTextColor = 0xFFFFFFFF;
 }
 
 bool StaticDrawableWrapper::extract_lua_instance(lua_State* L) const
@@ -450,8 +480,22 @@ void StaticDrawableWrapper::SetText(const char* text)
 
 void StaticDrawableWrapper::Draw()
 {
-	if (m_static->IsShown())
-		m_static->Draw();
+	if (!m_static->IsShown())
+		return;
+	if (m_fadeIn > 0.0f || m_fadeOut > 0.0f)
+	{
+		// MENU-FOCUS P16: appear and melt away in place, no movement.
+		float k = 1.0f;
+		const float now = Device.fTimeGlobal;
+		if (m_fadeIn > 0.0f)
+			k = std::min(k, (now - m_startTime) / m_fadeIn);
+		if (m_fadeOut > 0.0f && m_endTime > 0.0f)
+			k = std::min(k, (m_endTime - now) / m_fadeOut);
+		k = std::clamp(k, 0.0f, 1.0f);
+		m_static->SetTextureColor(subst_alpha(m_baseTextureColor, iFloor(color_get_A(m_baseTextureColor) * k + 0.5f)));
+		m_static->TextItemControl()->SetTextColor(subst_alpha(m_baseTextColor, iFloor(color_get_A(m_baseTextColor) * k + 0.5f)));
+	}
+	m_static->Draw();
 }
 
 void StaticDrawableWrapper::Update()

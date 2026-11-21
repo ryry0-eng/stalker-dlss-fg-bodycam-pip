@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "UIEditBox.h"
 #include "UIListBox.h"
 #include "UIInteractiveBackground.h"
@@ -29,6 +31,8 @@ public:
 	virtual bool IsChangedOptValue() const; // backup!=current
 
 	virtual void OnRender(); // only for list-box
+	virtual void Show(bool status);
+	static void RemoveFromRenderTree(CUIWindow* root);
 
 	LPCSTR GetText();
 	LPCSTR GetTextOf(int index);
@@ -59,11 +63,14 @@ protected:
 	virtual void Update();
 	virtual void Draw();
 	void ClearList();
+	void RegisterForRender();
+	void UnregisterFromRender();
 
 	u32 GetSize();
 
 protected:
 	bool m_bInited;
+	std::atomic<bool> m_bInSeqRender;
 	int m_iListHeight;
 	int m_itoken_id;
 	E_COMBO_STATE m_eState;

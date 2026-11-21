@@ -177,6 +177,7 @@ public:
 	float view_distance_factor() const { return (m_view_distance_factor); }
 
 public:
+	IC bool has_objects() const;
 	IC const VISIBLES& objects() const;
 	IC const VISIBLES* objectsPtr() const;
 	IC const RAW_VISIBLES& raw_objects() const;

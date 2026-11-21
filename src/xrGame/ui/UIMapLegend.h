@@ -35,6 +35,9 @@ public:
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 
+	CUIScrollView* GetList() const { return m_list; }
+	CUI3tButton* GetCloseBtn() const { return m_btn_close; }
+
 private: // m_
 	CUIFrameWindow* m_background;
 	CUIScrollView* m_list;

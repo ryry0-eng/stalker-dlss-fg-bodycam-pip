@@ -11,9 +11,7 @@ private:
 public:
 	CUIButton();
 
-	virtual ~CUIButton()
-	{
-	};
+	virtual ~CUIButton();
 
 	virtual bool OnMouseAction(float x, float y, EUIMessages mouse_action);
 	virtual void OnClick();
@@ -62,6 +60,12 @@ public:
 
 protected:
 
+	CUIStaticItem* m_menuShortcutIcon = nullptr;
+	CUIStaticItem* m_menuBackHoldIcon = nullptr;
+	CUIStaticItem* m_menuDotIcon = nullptr; // FIX-LIVE2 п.1: значок Dot Marks текущего семейства/стиля
+	string64 m_menuDotTex{};
+	ui_shader m_holdRingShader; // FIX-LIVE3 п.1: кольцо удержания поверх Dot Marks
+	CUIStaticItem* m_menuFooterArt = nullptr;
 	E_BUTTON_STATE m_eButtonState;
 	s16 m_uAccelerator[4];
 	bool m_bIsSwitch;

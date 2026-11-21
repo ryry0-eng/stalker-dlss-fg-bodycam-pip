@@ -44,6 +44,10 @@
 #include "pch_script.h"
 #include "script_game_object.h"
 #include "ai/stalker/ai_stalker.h"
+#include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
+
+static inline bool gp_c31_active() { return pInput && pInput->IsGamepadActiveSource(); }
 
 #define WEAPON_REMOVE_TIME		60000
 #define ROTATION_TIME			0.25f
@@ -516,11 +520,13 @@ void CWeapon::UpdateZoomParams() {
 	}
 
 	if (IsZoomed()) {
-		scope_radius = SDS_Radius(m_zoomtype == 1);
-		if (m_zoomtype == 0 && zoomFlags.test(SDS_SPEED) && (scope_radius > 0.0)) {
-			sens_multiple = scope_scrollpower;
-		} else {
-			sens_multiple = 1.0f;
+		if (!gp_c31_active() || ParentIsActor()) {
+			scope_radius = SDS_Radius(m_zoomtype == 1);
+			if (m_zoomtype == 0 && zoomFlags.test(SDS_SPEED) && (scope_radius > 0.0)) {
+				sens_multiple = scope_scrollpower;
+			} else {
+				sens_multiple = 1.0f;
+			}
 		}
 
 
@@ -1275,6 +1281,18 @@ BOOL CWeapon::net_Spawn(CSE_Abstract* DC)
 
 void CWeapon::net_Destroy()
 {
+	// C3.1: сброс глобалов зума при уничтожении оружия в режиме прицеливания
+	if (gp_c31_active() && m_zoom_params.m_bIsZoomModeNow)
+	{
+		m_zoom_params.m_bIsZoomModeNow = false;
+		if (ParentIsActor())
+		{
+			scope_radius = 0.0;
+			scope_2dtexactive = 0;
+			sens_multiple = 1.0f;
+		}
+	}
+
 	inherited::net_Destroy();
 
 	//óäàëèòü îáúåêòû ïàðòèêëîâ
@@ -1388,7 +1406,15 @@ void CWeapon::load(IReader& input_packet)
 	load_data(m_ammoType, input_packet);
 	load_data(m_zoom_params.m_bIsZoomModeNow, input_packet);
 
-	if (m_zoom_params.m_bIsZoomModeNow)
+	// C3.1: при загрузке сейва, сделанного в зуме, оружие ещё не привязано к родителю (H_Parent() == nullptr),
+	// а OnH_B_Chield в любом случае сбрасывает зум при привязке к инвентарю.
+	// Принудительно выходим из зума, чтобы не оставлять залипший sens_multiple от мирового/чужого оружия.
+	if (gp_c31_active())
+	{
+		m_zoom_params.m_bIsZoomModeNow = false;
+		OnZoomOut();
+	}
+	else if (m_zoom_params.m_bIsZoomModeNow)
 		OnZoomIn();
 	else
 		OnZoomOut();
@@ -1462,6 +1488,29 @@ void CWeapon::OnH_B_Independent(bool just_before_destroy)
 	SwitchState(eHidden);
 
 	m_strapped_mode = false;
+	// C3.1: прямая очистка глобалов и эффекторов зума до сброса m_bIsZoomModeNow
+	// (вызов виртуального OnZoomOut() здесь небезопасен при just_before_destroy и после отцепки HUD в inherited::OnH_B_Independent)
+	if (gp_c31_active() && m_zoom_params.m_bIsZoomModeNow)
+	{
+		if (ParentIsActor())
+		{
+			scope_radius = 0.0;
+			scope_2dtexactive = 0;
+			sens_multiple = 1.0f;
+		}
+		m_zoom_params.m_fCurrentZoomFactor = g_fov;
+		xr_delete(m_zoom_params.m_pVision);
+		if (m_zoom_params.m_pNight_vision)
+		{
+			m_zoom_params.m_pNight_vision->Stop(100000.0f, false);
+			xr_delete(m_zoom_params.m_pNight_vision);
+		}
+		if (!just_before_destroy && ParentIsActor())
+		{
+			GamePersistent().RestoreEffectorDOF();
+			GamePersistent().SetPickableEffectorDOF(false);
+		}
+	}
 	m_zoom_params.m_bIsZoomModeNow = false;
 	UpdateXForm();
 
@@ -2063,6 +2112,11 @@ BOOL CWeapon::CheckForMisfire()
 		StopShooting();
 		bMisfire = true;
 
+		if (ParentIsActor() && pInput && pInput->GetGamepadHaptics())
+		{
+			pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Jam, 1.0f, 0, "Weapon::CheckForMisfire");
+		}
+
 		return TRUE;
 	}
 	else
@@ -2078,7 +2132,12 @@ bool CWeapon::IsMisfire() const
 
 void CWeapon::SetMisfireScript(bool b)
 {
+	const bool wasMisfire = bMisfire;
 	bMisfire = b;
+	if (b && !wasMisfire && ParentIsActor() && pInput && pInput->GetGamepadHaptics())
+	{
+		pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Jam, 1.0f, 0, "Weapon::SetMisfireScript");
+	}
 }
 
 void CWeapon::Reload()
@@ -2526,13 +2585,17 @@ void CWeapon::OnZoomIn()
 	if (m_zoomtype == 0)
 		RefreshSvpTypedMagnifications();
     //////////
-    scope_radius = SDS_Radius(m_zoomtype == 1);
+	// C3.1: zoom globals (scope_radius, sens_multiple) belong to actor camera only
+	if (!gp_c31_active() || ParentIsActor())
+	{
+		scope_radius = SDS_Radius(m_zoomtype == 1);
 
-	if ((scope_radius > 0.0) && zoomFlags.test(SDS_SPEED)) {
-		sens_multiple = scope_scrollpower;
-	}
-	else {
-		sens_multiple = 1.0f;
+		if ((scope_radius > 0.0) && zoomFlags.test(SDS_SPEED)) {
+			sens_multiple = scope_scrollpower;
+		}
+		else {
+			sens_multiple = 1.0f;
+		}
 	}
     //////////
     
@@ -3691,6 +3754,10 @@ void CWeapon::OnStateSwitch(u32 S, u32 oldState)
 {
 	inherited::OnStateSwitch(S, oldState);
 	m_BriefInfo_CalcFrame = 0;
+
+	// C3.1: guaranteed zoom reset when entering eHidden/eHiding
+	if (gp_c31_active() && (S == eHidden || S == eHiding) && IsZoomed())
+		OnZoomOut();
 
 	// NPC reload edges for Lua (npc_on_weapon_reload_start / _stop). Actor reloads already surface
 	// through the actor binder callback (actor_on_weapon_reload); a stalker's reload was observable

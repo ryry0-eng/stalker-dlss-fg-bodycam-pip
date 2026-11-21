@@ -27,6 +27,11 @@
 #include "InventoryBox.h"
 #include "player_hud.h"
 #include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadMath.h"
+#include "../xrEngine/GamepadErrorGuard.h"
+#include "../xrEngine/XR_IOConsole.h"
+#include "GamepadContextDispatcher.h"
+#include "GamepadAimAssist.h"
 #include "flare.h"
 #include "CustomDetector.h"
 #include "clsid_game.h"
@@ -498,6 +503,245 @@ void CActor::IR_OnMouseMove(int dx, int dy)
 	}
 	m_bodycam.AddMouseLookDelta(bodycam_yaw_delta, bodycam_pitch_delta);
 }
+
+// C3.1 + D2.2: конвейер мёртвой зоны, насыщения и кривой камеры из профиля калибровки (GamepadMath)
+constexpr float GAMEPAD_LOOK_OMEGA_HORZ = 4.0f;
+constexpr float GAMEPAD_LOOK_OMEGA_VERT = 2.5f;
+constexpr float GAMEPAD_LOOK_MIN_DELTA = 1e-6f;
+
+extern bool g_bDisableAllInput;
+bool g_gp_synth_look_active = false;
+float g_gp_synth_look_rx = 0.f;
+float g_gp_synth_look_ry = 0.f;
+float g_gp_synth_look_time_left = 0.f;
+float g_gp_synth_look_duration = 0.f;
+float g_gp_synth_look_accum_yaw = 0.f;
+float g_gp_synth_look_accum_pitch = 0.f;
+u32 g_gp_synth_look_frames = 0;
+static float g_gp_turn_accel_ramp = 0.f; // K6b: плавный множитель ускорения поворота у края правого стика (0..1)
+
+void CActor::IR_OnGamepadLook(float rx, float ry, float dt)
+{
+	if (dt <= 0.f || hud_adj_mode)
+		return;
+
+	PIItem iitem = inventory().ActiveItem();
+	if (iitem && iitem->cast_hud_item())
+		iitem->cast_hud_item()->ResetSubStateTime();
+
+	if (Remote() || m_holder != nullptr)
+		return;
+
+	if (cam_freelook == eflEnabling || cam_freelook == eflDisabling)
+		return;
+
+	const float LookFactor = GetLookFactor();
+	if (LookFactor <= EPS_S)
+		return;
+
+	CCameraBase* C = cameras[cam_active];
+	if (!C)
+		return;
+
+	const gpmath::CalibrationProfile& calib = gpmath::GetCalibrationProfile();
+	const float omegaH = g_gp_synth_look_active ? GAMEPAD_LOOK_OMEGA_HORZ : calib.omega_horz;
+	const float omegaV = g_gp_synth_look_active ? GAMEPAD_LOOK_OMEGA_VERT : calib.omega_vert;
+
+	const bool isAds = CGamepadContextDispatcher::Instance().IsGamepadAdsHeld() || IsZoomAimingMode();
+	const float k6bScale = g_gp_synth_look_active ? 1.0f : gpmath::ComputeLookSpeedScale(calib.ads_sens_mult, isAds, calib.turn_accel, g_gp_turn_accel_ramp);
+	float ratio = C->f_fov / g_fov;
+	if (cam_active == eacFirstEye && Device.true_pip_on && Device.m_SecondViewport.IsSVPActive())
+	{
+		extern float g_svp_sens, g_svp_sens_curve;
+		ratio = powf(currentFOV(true) / g_fov, g_svp_sens_curve) * g_svp_sens;
+	}
+	const float fovScale = ratio * sens_multiple / LookFactor * k6bScale;
+	const float dYaw = rx * omegaH * fovScale * dt;
+	const float invY = psMouseInvert.test(1) ? -1.f : 1.f;
+	const float dPitch = invY * ry * omegaV * fovScale * dt;
+
+	if (_abs(dYaw) >= GAMEPAD_LOOK_MIN_DELTA)
+		cam_Active()->Move((dYaw < 0.f) ? kLEFT : kRIGHT, _abs(dYaw));
+
+	if (_abs(dPitch) >= GAMEPAD_LOOK_MIN_DELTA)
+		// C3.1b: ry > 0 = стик вверх; в CCameraFirstEye::Move kDOWN поднимает взгляд (как dy < 0 в IR_OnMouseMove:479)
+		cam_Active()->Move((dPitch > 0.f) ? kDOWN : kUP, _abs(dPitch));
+
+	// Feed Bodycam sway/inertia identically to IR_OnMouseMove (dPitch > 0 looks up = negative pitch delta)
+	m_bodycam.AddMouseLookDelta(
+		(_abs(dYaw) >= GAMEPAD_LOOK_MIN_DELTA) ? dYaw : 0.f,
+		(_abs(dPitch) >= GAMEPAD_LOOK_MIN_DELTA) ? -dPitch : 0.f);
+
+	if (g_gp_synth_look_active)
+	{
+		g_gp_synth_look_accum_yaw += dYaw;
+		g_gp_synth_look_accum_pitch += dPitch;
+		++g_gp_synth_look_frames;
+	}
+}
+
+// FIX-LIVE5 (Миша 2026-11-16): после колеса / выбора оружия / окна правый стик часто ещё отклонён, и камера
+// «улетала» в первый же кадр. Пока поворот камеры заблокирован, взводится барьер; после разблокировки камера ждёт
+// возврата RS почти в центр (физический наклон < GP_LOOK_BARRIER_MAG), и только потом снова вращается.
+static bool s_gpLookBarrier = false;
+constexpr float GP_LOOK_BARRIER_MAG = 0.3f;
+
+void CActor::UpdateGamepadLookInput(float dt)
+{
+	struct SLookGuardCtx
+	{
+		CActor* self;
+		float dt;
+	};
+	SLookGuardCtx stepCtx = { this, dt };
+	u32 sehCode = 0;
+	u64 sehAddr = 0;
+	const bool stepOk = gperr::ExecuteProtectedGamepadStepSEH(
+	    +[](void* rawCtx)
+	    {
+		    SLookGuardCtx* c = static_cast<SLookGuardCtx*>(rawCtx);
+		    if (!c || !c->self)
+			    return;
+		    CActor* self = c->self;
+		    const float stepDtVal = c->dt;
+
+		    CGamepadContextDispatcher::Instance().OnFrame();
+		    if ((Console && Console->bVisible) || !CGamepadContextDispatcher::Instance().AllowsWorldLook())
+		    {
+			    s_gpLookBarrier = true;
+			    return;
+		    }
+
+		    if (Device.Paused() || stepDtVal <= 0.f || g_bDisableAllInput || !self->g_Alive() || self->Remote() || self->IsTalking() || self->m_holder != nullptr || hud_adj_mode != 0)
+			    return;
+
+		    if (CurrentGameUI())
+		    {
+			    CUIDialogWnd* pTIR = CurrentGameUI()->TopInputReceiver();
+			    if (pTIR && pTIR->IR_process())
+			    {
+				    s_gpLookBarrier = true;
+				    return;
+			    }
+		    }
+
+		    if (g_gp_synth_look_active)
+		    {
+			    Fvector2 synth = { g_gp_synth_look_rx, g_gp_synth_look_ry };
+			    const float mag = synth.magnitude();
+			    if (mag > 1.f)
+				    synth.mul(1.f / mag);
+
+			    const float stepDt = (stepDtVal < g_gp_synth_look_time_left) ? stepDtVal : g_gp_synth_look_time_left;
+			    if (mag > EPS_S && stepDt > 0.f)
+				    self->IR_OnGamepadLook(synth.x, synth.y, stepDt);
+
+			    g_gp_synth_look_time_left -= stepDtVal;
+			    if (g_gp_synth_look_time_left <= 0.f)
+			    {
+				    g_gp_synth_look_active = false;
+				    g_gp_synth_look_time_left = 0.f;
+				    Msg("* [Gamepad] gp_synth_look done: rx=%.4f ry=%.4f sec=%.4f yaw_rad=%.6f yaw_deg=%.2f pitch_rad=%.6f pitch_deg=%.2f frames=%u sens_multiple=%.4f",
+				        g_gp_synth_look_rx, g_gp_synth_look_ry, g_gp_synth_look_duration,
+				        g_gp_synth_look_accum_yaw, rad2deg(g_gp_synth_look_accum_yaw),
+				        g_gp_synth_look_accum_pitch, rad2deg(g_gp_synth_look_accum_pitch),
+				        g_gp_synth_look_frames, sens_multiple);
+			    }
+			    return;
+		    }
+
+		    if (!pInput)
+			    return;
+
+		    const CInput::sxr_gamepad_state& gp = pInput->GetGamepadState();
+		    if (!gp.connected || !gp.has_focus)
+			    return;
+
+		    const float rawX = gpmath::NormalizeStickAxis(gp.axes[2]);
+		    const float rawY = -gpmath::NormalizeStickAxis(gp.axes[3]);
+		    const gpmath::CalibrationProfile& calibProf = gpmath::GetCalibrationProfile();
+		    if (s_gpLookBarrier)
+		    {
+			    if (rawX * rawX + rawY * rawY >= GP_LOOK_BARRIER_MAG * GP_LOOK_BARRIER_MAG)
+			    {
+				    gpmath::StepTurnAcceleration(g_gp_turn_accel_ramp, 0.f, calibProf.turn_accel, stepDtVal);
+				    return;
+			    }
+			    s_gpLookBarrier = false;
+		    }
+		    gpmath::Vec2 lk = gpmath::ProcessStick(calibProf.right_stick, rawX, rawY);
+		    const float procMag = _sqrt(lk.x * lk.x + lk.y * lk.y);
+		    gpmath::StepTurnAcceleration(g_gp_turn_accel_ramp, procMag, calibProf.turn_accel, stepDtVal);
+
+		    // E4.1: помощь прицеливания. D05: при gp_aa_level=off модуль не вызывается вообще.
+		    if (gpaa::g_level != 0)
+		    {
+			    const gpmath::Vec2 mv = CGamepadContextDispatcher::Instance().AllowsWorldMove()
+			                                ? gpmath::ProcessStick(gpmath::GetCalibrationProfile().left_stick,
+			                                                       gpmath::NormalizeStickAxis(gp.axes[0]), -gpmath::NormalizeStickAxis(gp.axes[1]))
+			                                : gpmath::Vec2{ 0.f, 0.f };
+
+			    gpaa::FrameInput in;
+			    in.dt = stepDtVal;
+			    in.lookX = lk.x;
+			    in.lookY = lk.y;
+			    in.moveMag = _sqrt(mv.x * mv.x + mv.y * mv.y);
+			    in.ads = CGamepadContextDispatcher::Instance().IsGamepadAdsHeld() || self->IsZoomAimingMode();
+			    in.gamepadSource = pInput->IsGamepadActiveSource();
+			    in.actor = self;
+			    in.cam = self->cam_Active();
+			    in.weapon = smart_cast<CWeapon*>(self->inventory().ActiveItem());
+			    in.eligible = self->cam_active == eacFirstEye && self->cam_freelook == eflDisabled && self->m_holder == nullptr && hud_adj_mode == 0;
+
+			    gpaa::FrameOutput out;
+			    gpaa::Process(in, out);
+			    lk.x = out.lookX;
+			    lk.y = out.lookY;
+			    self->ApplyGamepadAimAssistDelta(out.addYaw, out.addPitch);
+		    }
+
+		    if (_abs(lk.x) <= EPS_S && _abs(lk.y) <= EPS_S)
+			    return;
+
+		    self->IR_OnGamepadLook(lk.x, lk.y, stepDtVal);
+	    },
+	    &stepCtx,
+	    sehCode,
+	    sehAddr);
+
+	if (!stepOk)
+	{
+		g_gp_synth_look_active = false;
+		g_gp_synth_look_time_left = 0.f;
+		m_vGamepadMove.set(0.f, 0.f);
+		CGamepadContextDispatcher::Instance().ConsumeAllCurrentlyHeldButtons();
+		const LPCSTR ctxName = CGamepadContextDispatcher::GetContextName(CGamepadContextDispatcher::Instance().GetCurrentContext());
+		if (pInput)
+		{
+			pInput->HandleGamepadFrameError("CActor::UpdateGamepadLookInput", nullptr, sehCode, sehAddr, ctxName);
+		}
+		else
+		{
+			gperr::HandleProtectedFrameFailure("CActor::UpdateGamepadLookInput", nullptr, sehCode, sehAddr);
+		}
+	}
+}
+
+// E4.1: прямой поворот камеры от помощи прицеливания (рад), без чувствительности, инверсии и FOV-масштаба стика.
+void CActor::ApplyGamepadAimAssistDelta(float yaw, float pitch)
+{
+	if (cam_active != eacFirstEye || cam_freelook != eflDisabled || m_holder != nullptr || hud_adj_mode != 0)
+		return;
+	CCameraBase* C = cam_Active();
+	if (!C || !_valid(yaw) || !_valid(pitch))
+		return;
+	if (_abs(yaw) >= GAMEPAD_LOOK_MIN_DELTA)
+		C->Move((yaw > 0.f) ? kRIGHT : kLEFT, _abs(yaw));
+	if (_abs(pitch) >= GAMEPAD_LOOK_MIN_DELTA)
+		// C3.1b: kDOWN поднимает взгляд в CCameraFirstEye::Move
+		C->Move((pitch > 0.f) ? kDOWN : kUP, _abs(pitch));
+}
+
 
 #include "HudItem.h"
 

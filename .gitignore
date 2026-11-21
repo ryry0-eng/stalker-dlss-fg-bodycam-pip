@@ -5,6 +5,7 @@
 
 # exclude binaries and temporary files
 _build/
+tools/tests/*/bin/
 # Downloaded upscaler runtimes and machine-specific shader dependency files
 nvngx_dlss*.dll
 /sdk/Streamline/bin/
@@ -48,6 +49,16 @@ compressor/mod.db0
 # emacs temp file
 \#*\#
 *~
+
+__pycache__/
+
+# SDL3 x64 import lib and runtime DLL
+!/src/3rd party/SDL3/lib/x64/
+/src/3rd party/SDL3/lib/x64/*
+!/src/3rd party/SDL3/lib/x64/SDL3.lib
+!/src/3rd party/SDL3/lib/x64/SDL3.dll
+/src/3rd party/SDL3/lib/arm64/
+/src/3rd party/SDL3/lib/x86/
 
 # Local development tools, tests and validation artifacts are not published.
 /tools/*

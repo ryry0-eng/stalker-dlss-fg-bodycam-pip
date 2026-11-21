@@ -51,41 +51,50 @@ bool CUITrackBar::OnMouseAction(float x, float y, EUIMessages mouse_action)
 		}
 		break;
 	case WINDOW_MOUSE_WHEEL_UP:
-		{
-			if (m_b_is_float)
-			{
-				m_f_val -= GetInvert() ? -m_f_step : m_f_step;
-				clamp(m_f_val, m_f_min, m_f_max);
-			}
-			else
-			{
-				m_i_val -= GetInvert() ? -m_i_step : m_i_step;
-				clamp(m_i_val, m_i_min, m_i_max);
-			}
-			GetMessageTarget()->SendMessage(this, BUTTON_CLICKED, NULL);
-			UpdatePos();
-			OnChangedOptValue();
-		}
+		StepValue(-1);
 		break;
 	case WINDOW_MOUSE_WHEEL_DOWN:
-		{
-			if (m_b_is_float)
-			{
-				m_f_val += GetInvert() ? -m_f_step : m_f_step;
-				clamp(m_f_val, m_f_min, m_f_max);
-			}
-			else
-			{
-				m_i_val += GetInvert() ? -m_i_step : m_i_step;
-				clamp(m_i_val, m_i_min, m_i_max);
-			}
-			GetMessageTarget()->SendMessage(this, BUTTON_CLICKED, NULL);
-			UpdatePos();
-			OnChangedOptValue();
-		}
+		StepValue(1);
 		break;
 	};
 	return true;
+}
+
+namespace
+{
+double QuarterTrackbarValue(double value, double minimum, double maximum, double step, int direction)
+{
+	const double requested = std::clamp(value + direction * std::max((maximum - minimum) * 0.25, step),
+	                                    minimum, maximum);
+	if (requested == minimum || requested == maximum || step <= 0.0)
+		return requested;
+	return std::clamp(minimum + std::round((requested - minimum) / step) * step, minimum, maximum);
+}
+}
+
+void CUITrackBar::StepValue(int direction, bool largeStep)
+{
+	const int step = GetInvert() ? -direction : direction;
+	if (m_b_is_float)
+	{
+		if (largeStep)
+			m_f_val = static_cast<float>(QuarterTrackbarValue(m_f_val, m_f_min, m_f_max, m_f_step, direction));
+		else
+			m_f_val += step * m_f_step;
+		clamp(m_f_val, m_f_min, m_f_max);
+	}
+	else
+	{
+		if (largeStep)
+			m_i_val = static_cast<int>(QuarterTrackbarValue(m_i_val, m_i_min, m_i_max, std::max(1, m_i_step), direction));
+		else
+			m_i_val += step * m_i_step;
+		clamp(m_i_val, m_i_min, m_i_max);
+	}
+	if (CUIWindow* target = GetMessageTarget())
+		target->SendMessage(this, BUTTON_CLICKED, NULL);
+	UpdatePos();
+	OnChangedOptValue();
 }
 
 void CUITrackBar::InitTrackBar(Fvector2 pos, Fvector2 size)
@@ -108,6 +117,13 @@ void CUITrackBar::InitTrackBar(Fvector2 pos, Fvector2 size)
 	m_pSlider->InitTexture("ui_inGame2_opt_slider_box");
 
 	SetCurrentState(S_Enabled);
+}
+
+float CUITrackBar::GetSliderCenter()
+{
+	Frect rect;
+	m_pSlider->GetAbsoluteRect(rect);
+	return (rect.x1 + rect.x2) * 0.5f;
 }
 
 void CUITrackBar::Draw()

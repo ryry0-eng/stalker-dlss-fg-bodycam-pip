@@ -21,6 +21,9 @@
 #include "../gametaskmanager.h"
 #include "../actor.h"
 #include "UICheckButton.h"
+#include "UIScrollView.h"
+#include "../UICursor.h"
+#include "../ui_base.h"
 
 int g_ui_pda_task_cache = 1;
 
@@ -472,4 +475,403 @@ bool CUITaskItem::OnMouseAction(float x, float y, EUIMessages mouse_action)
 void CUITaskItem::SendMessage(CUIWindow* pWnd, s16 msg, void* pData)
 {
 	inherited::SendMessage(pWnd, msg, pData);
+}
+#include "UIPropertiesBox.h"
+#include "UIListBoxItem.h"
+
+static void PushShownWindowRect(CUIWindow* w, xr_vector<Frect>& outRects)
+{
+	if (!w || !w->IsShown())
+		return;
+	Frect r;
+	w->GetAbsoluteRect(r);
+	if (r.width() > 2.0f && r.height() > 2.0f)
+		outRects.push_back(r);
+}
+
+// FIX-LIVE3 p.22: one gamepad frame per task row = union of the name button and the "center" button.
+static void PushTaskRowRect(UITaskListWndItem* taskItm, xr_vector<Frect>& outRects)
+{
+	if (!taskItm)
+		return;
+	Frect u;
+	bool have = false;
+	CUIWindow* parts[2] = {taskItm->GetNameBtn(), taskItm->GetFocusBtn()};
+	for (CUIWindow* w : parts)
+	{
+		if (!w || !w->IsShown())
+			continue;
+		Frect r;
+		w->GetAbsoluteRect(r);
+		if (r.width() <= 2.0f || r.height() <= 2.0f)
+			continue;
+		if (!have)
+		{
+			u = r;
+			have = true;
+		}
+		else
+		{
+			u.x1 = _min(u.x1, r.x1);
+			u.y1 = _min(u.y1, r.y1);
+			u.x2 = _max(u.x2, r.x2);
+			u.y2 = _max(u.y2, r.y2);
+		}
+	}
+	if (have)
+		outRects.push_back(u);
+}
+
+static UITaskListWndItem* TaskItemAt(CUIScrollView* sv, int idx)
+{
+	if (!sv || idx < 0 || idx >= int(sv->GetSize()))
+		return nullptr;
+	return smart_cast<UITaskListWndItem*>(sv->GetItem(u32(idx)));
+}
+
+bool CUITaskWnd::GamepadTaskStep(int dir, Fvector2* outSnapPos)
+{
+	if (!m_task_wnd)
+		return false;
+	CUIScrollView* sv = m_task_wnd->GetTaskList();
+	const bool wasOpen = m_task_wnd->IsShown();
+	if (!wasOpen)
+	{
+		if (m_map_legend_wnd && m_map_legend_wnd->IsShown())
+			m_map_legend_wnd->Show(false);
+		Show_TaskListWnd(true);
+	}
+	if (!sv || sv->GetSize() == 0)
+		return wasOpen != m_task_wnd->IsShown();
+	const int n = int(sv->GetSize());
+	if (!wasOpen || m_gpTaskIdx < 0 || m_gpTaskIdx >= n)
+	{
+		m_gpTaskIdx = 0;
+		CGameTask* active = Level().GameTaskManager().ActiveTask();
+		for (int i = 0; i < n; ++i)
+		{
+			UITaskListWndItem* it = TaskItemAt(sv, i);
+			if (it && active && it->GetTask() == active)
+			{
+				m_gpTaskIdx = i;
+				break;
+			}
+		}
+	}
+	else
+	{
+		m_gpTaskIdx = clampr(m_gpTaskIdx + dir, 0, n - 1);
+	}
+	UITaskListWndItem* item = TaskItemAt(sv, m_gpTaskIdx);
+	if (!item)
+		return true;
+	// keep the selected row inside the visible part of the list
+	Frect svr, ir;
+	sv->GetAbsoluteRect(svr);
+	item->GetAbsoluteRect(ir);
+	int pos = sv->GetCurrentScrollPos();
+	if (ir.y1 < svr.y1)
+		pos -= iCeil(svr.y1 - ir.y1);
+	else if (ir.y2 > svr.y2)
+		pos += iCeil(ir.y2 - svr.y2);
+	pos = clampr(pos, sv->GetMinScrollPos(), _max(sv->GetMinScrollPos(), sv->GetMaxScrollPos()));
+	if (pos != sv->GetCurrentScrollPos())
+		sv->SetScrollPos(pos);
+	if (outSnapPos)
+	{
+		xr_vector<Frect> rr;
+		PushTaskRowRect(item, rr);
+		if (!rr.empty())
+			outSnapPos->set((rr[0].x1 + rr[0].x2) * 0.5f, (rr[0].y1 + rr[0].y2) * 0.5f);
+		else
+		{
+			item->GetAbsoluteRect(ir);
+			outSnapPos->set((ir.x1 + ir.x2) * 0.5f, (ir.y1 + ir.y2) * 0.5f);
+		}
+	}
+	return true;
+}
+
+bool CUITaskWnd::GamepadTaskPick()
+{
+	if (!m_task_wnd || !m_task_wnd->IsShown())
+		return false;
+	CUIScrollView* sv = m_task_wnd->GetTaskList();
+	if (!sv)
+		return false;
+	// row under the cursor wins (LS/mouse may have moved it); else the D-pad selection
+	UITaskListWndItem* item = nullptr;
+	const Fvector2 cur = GetUICursor().GetCursorPosition();
+	for (int i = 0, n = int(sv->GetSize()); i < n; ++i)
+	{
+		UITaskListWndItem* it = TaskItemAt(sv, i);
+		if (!it)
+			continue;
+		xr_vector<Frect> rr;
+		PushTaskRowRect(it, rr);
+		if (!rr.empty() && rr[0].in(cur.x, cur.y))
+		{
+			item = it;
+			m_gpTaskIdx = i;
+			break;
+		}
+	}
+	if (!item)
+		item = TaskItemAt(sv, m_gpTaskIdx);
+	if (!item || !item->GetTask())
+		return false;
+	CGameTask* task = item->GetTask();
+	Level().GameTaskManager().SetActiveTask(task);
+	Show_TaskListWnd(false);
+	TaskSetTargetMap(task);
+	return true;
+}
+
+bool CUITaskWnd::CloseTopTaskOverlay()
+{
+	if (m_pMapWnd && m_pMapWnd->CloseGamepadPropertiesBox())
+		return true;
+	if (m_task_wnd && m_task_wnd->IsShown())
+	{
+		m_task_wnd_show = false;
+		m_task_wnd->Show(false);
+		return true;
+	}
+	if (m_map_legend_wnd && m_map_legend_wnd->IsShown())
+	{
+		m_map_legend_wnd->Show(false);
+		return true;
+	}
+	return false;
+}
+
+bool CUITaskWnd::ToggleTaskListWndGamepad(Fvector2* outSnapPos)
+{
+	OnShowTaskListWnd(nullptr, nullptr);
+	if (outSnapPos)
+	{
+		if (m_task_wnd && m_task_wnd->IsShown())
+		{
+			CUIScrollView* sv = m_task_wnd->GetTaskList();
+			if (sv && sv->GetSize() > 0)
+			{
+				CUIWindow* firstItem = sv->GetItem(0);
+				if (firstItem)
+				{
+					Frect r;
+					firstItem->GetAbsoluteRect(r);
+					outSnapPos->set((r.x1 + r.x2) * 0.5f, (r.y1 + r.y2) * 0.5f);
+					return true;
+				}
+			}
+			Frect r;
+			m_task_wnd->GetAbsoluteRect(r);
+			outSnapPos->set((r.x1 + r.x2) * 0.5f, (r.y1 + r.y2) * 0.5f);
+		}
+		else if (m_BtnTaskListWnd && m_BtnTaskListWnd->IsShown())
+		{
+			Frect r;
+			m_BtnTaskListWnd->GetAbsoluteRect(r);
+			outSnapPos->set((r.x1 + r.x2) * 0.5f, (r.y1 + r.y2) * 0.5f);
+		}
+	}
+	return true;
+}
+
+void CUITaskWnd::GatherGamepadTaskTargets(xr_vector<Frect>& outRects) const
+{
+	if (m_pMapWnd && m_pMapWnd->GetPropertiesBox() && m_pMapWnd->GetPropertiesBox()->IsShown())
+	{
+		CUIPropertiesBox* pbox = m_pMapWnd->GetPropertiesBox();
+		for (u32 i = 0, n = pbox->GetItemsCount(); i < n; ++i)
+		{
+			CUIListBoxItem* itm = pbox->GetItemByIDX(i);
+			PushShownWindowRect(itm, outRects);
+		}
+		return;
+	}
+
+	PushShownWindowRect(m_BtnTaskListWnd, outRects);
+	PushShownWindowRect(m_btn_focus, outRects);
+	PushShownWindowRect(m_pStoryLineTaskItem, outRects);
+	PushShownWindowRect(m_cbTreasures, outRects);
+	PushShownWindowRect(m_cbQuestNpcs, outRects);
+	PushShownWindowRect(m_cbSecondaryTasks, outRects);
+	PushShownWindowRect(m_cbPrimaryObjects, outRects);
+
+	if (m_task_wnd && m_task_wnd->IsShown())
+	{
+		PushShownWindowRect(m_task_wnd->GetCloseBtn(), outRects);
+		CUIScrollView* sv = m_task_wnd->GetTaskList();
+		if (sv && sv->IsShown())
+		{
+			Frect svRect;
+			sv->GetAbsoluteRect(svRect);
+			for (u32 i = 0, n = sv->GetSize(); i < n; ++i)
+			{
+				CUIWindow* w = sv->GetItem(i);
+				UITaskListWndItem* taskItm = smart_cast<UITaskListWndItem*>(w);
+				if (taskItm)
+				{
+					Frect ir;
+					taskItm->GetAbsoluteRect(ir);
+					const float cy = (ir.y1 + ir.y2) * 0.5f;
+					if (cy >= svRect.y1 && cy <= svRect.y2)
+						PushTaskRowRect(taskItm, outRects);
+				}
+			}
+		}
+	}
+
+	if (m_pMapWnd && m_pMapWnd->IsShown())
+	{
+		m_pMapWnd->GatherGamepadMapSpotTargets(outRects);
+	}
+}
+
+bool CUITaskWnd::HandleGamepadRightStick(float curX, float curY, int wheelDir)
+{
+	if (wheelDir == 0)
+		return false;
+	const EUIMessages msg = (wheelDir > 0) ? WINDOW_MOUSE_WHEEL_UP : WINDOW_MOUSE_WHEEL_DOWN;
+
+	if (m_task_wnd && m_task_wnd->IsShown())
+	{
+		Frect tr;
+		m_task_wnd->GetAbsoluteRect(tr);
+		if (tr.in(curX, curY))
+		{
+			CUIScrollView* sv = m_task_wnd->GetTaskList();
+			if (sv)
+			{
+				Frect svr;
+				sv->GetAbsoluteRect(svr);
+				sv->OnMouseAction(curX - svr.x1, curY - svr.y1, msg);
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+LPCSTR CUITaskWnd::GetGamepadOverlayName() const
+{
+	if (m_pMapWnd && m_pMapWnd->GetPropertiesBox() && m_pMapWnd->GetPropertiesBox()->IsShown())
+		return "menu";
+	if (m_task_wnd && m_task_wnd->IsShown())
+		return "tasks";
+	if (m_map_legend_wnd && m_map_legend_wnd->IsShown())
+		return "legend";
+	return "";
+}
+
+void CUITaskWnd::GatherGamepadFilterBarRects(xr_vector<Frect>& outRects) const
+{
+	PushShownWindowRect(m_BtnTaskListWnd, outRects);
+	PushShownWindowRect(m_cbTreasures, outRects);
+	PushShownWindowRect(m_cbPrimaryObjects, outRects);
+	PushShownWindowRect(m_cbSecondaryTasks, outRects);
+	PushShownWindowRect(m_cbQuestNpcs, outRects);
+	for (size_t i = 1; i < outRects.size(); ++i)
+	{
+		const Frect key = outRects[i];
+		size_t j = i;
+		while (j > 0 && outRects[j - 1].x1 > key.x1)
+		{
+			outRects[j] = outRects[j - 1];
+			--j;
+		}
+		outRects[j] = key;
+	}
+}
+
+void CUITaskWnd::GatherGamepadOverlayTargets(xr_vector<Frect>& outRects) const
+{
+	if (m_pMapWnd && m_pMapWnd->GetPropertiesBox() && m_pMapWnd->GetPropertiesBox()->IsShown())
+	{
+		CUIPropertiesBox* pbox = m_pMapWnd->GetPropertiesBox();
+		for (u32 i = 0, n = pbox->GetItemsCount(); i < n; ++i)
+		{
+			CUIListBoxItem* itm = pbox->GetItemByIDX(i);
+			PushShownWindowRect(itm, outRects);
+		}
+		return;
+	}
+	if (m_task_wnd && m_task_wnd->IsShown())
+	{
+		PushShownWindowRect(m_task_wnd->GetCloseBtn(), outRects);
+		CUIScrollView* sv = m_task_wnd->GetTaskList();
+		if (sv && sv->IsShown())
+		{
+			Frect svRect;
+			sv->GetAbsoluteRect(svRect);
+			for (u32 i = 0, n = sv->GetSize(); i < n; ++i)
+			{
+				CUIWindow* w = sv->GetItem(i);
+				UITaskListWndItem* taskItm = smart_cast<UITaskListWndItem*>(w);
+				if (taskItm)
+				{
+					Frect ir;
+					taskItm->GetAbsoluteRect(ir);
+					const float cy = (ir.y1 + ir.y2) * 0.5f;
+					if (cy >= svRect.y1 && cy <= svRect.y2)
+						PushTaskRowRect(taskItm, outRects);
+				}
+			}
+		}
+		return;
+	}
+	if (m_map_legend_wnd && m_map_legend_wnd->IsShown())
+	{
+		PushShownWindowRect(m_map_legend_wnd->GetCloseBtn(), outRects);
+	}
+}
+
+void CUITaskWnd::StepGamepadMapPan(float stickX, float stickY, bool bModifierHeld, float curX, float curY, u32 dtMs)
+{
+	if (!m_pMapWnd || !m_pMapWnd->IsShown())
+		return;
+	if (GetGamepadOverlayName()[0] != '\0')
+		return;
+
+	const float dtSec = clampr(float(dtMs) * 0.001f, 0.001f, 0.1f);
+	const float panSpeed = 680.0f;
+
+	if (bModifierHeld)
+	{
+		if (_abs(stickX) > 0.05f || _abs(stickY) > 0.05f)
+		{
+			// SDL/ui_stick: stickY < 0 is UP on stick (screen -Y); MoveMap takes map delta (+Y shifts map down)
+			Fvector2 delta;
+			delta.set(-stickX * panSpeed * dtSec, -stickY * panSpeed * dtSec);
+			m_pMapWnd->MoveMap(delta, true);
+		}
+		return;
+	}
+
+	const Frect mapRect = m_pMapWnd->ActiveMapRect();
+	if (!mapRect.in(curX, curY))
+		return;
+
+	const float edgeMargin = 64.0f;
+	float panX = 0.0f;
+	float panY = 0.0f;
+
+	if (curX <= mapRect.x1 + edgeMargin && stickX < -0.15f)
+		panX = -stickX * panSpeed * dtSec;
+	else if (curX >= mapRect.x2 - edgeMargin && stickX > 0.15f)
+		panX = -stickX * panSpeed * dtSec;
+
+	if (curY <= mapRect.y1 + edgeMargin && stickY < -0.15f)
+		panY = -stickY * panSpeed * dtSec;
+	else if (curY >= mapRect.y2 - edgeMargin && stickY > 0.15f)
+		panY = -stickY * panSpeed * dtSec;
+
+	if (_abs(panX) > EPS_S || _abs(panY) > EPS_S)
+	{
+		Fvector2 delta;
+		delta.set(panX, panY);
+		m_pMapWnd->MoveMap(delta, true);
+	}
 }

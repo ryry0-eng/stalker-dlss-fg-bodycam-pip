@@ -120,9 +120,9 @@ public:
 	void ReceiveNews(GAME_NEWS_DATA* news);
 	void UpdateMainIndicators();
 	void UpdateBoosterIndicators(const xr_map<EBoostParams, SBooster> influences);
+	void UpdateQuickSlots();
 
 protected:
-	void UpdateQuickSlots();
 	void SetWarningIconColorUI(CUIStatic* s, const u32 cl);
 	void InitFlashingIcons(CUIXml* node);
 	void DestroyFlashingIcons();

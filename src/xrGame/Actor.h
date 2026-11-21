@@ -405,6 +405,9 @@ public:
 	u8 cam_freelook;
 	float freelook_cam_control;
 	float old_torso_yaw;
+	void cam_SetFreelook();
+	void cam_UnsetFreelook();
+	bool CanUseFreelook();
 
 protected:
 	//virtual	void			cam_Set					(EActorCameras style);
@@ -447,9 +450,6 @@ protected:
 	void cam_SetLadder();
 	void cam_UnsetLadder();
 	void camUpdateFreelook(float dt);
-	void cam_SetFreelook();
-	void cam_UnsetFreelook();
-	bool CanUseFreelook();
 	float currentFOV(bool wantSVPFov = false); // pip wantSVPFov true returns the zoomed fov, false keeps the main view wide while the SVP zooms
 
 	// Cameras
@@ -556,7 +556,12 @@ public:
 	bool CanSprint();
 	bool CanRun();
 	void StopAnyMove();
-	void StopSprint() { mstate_wishful &= ~mcSprint; }
+	void StopSprint()
+	{
+		mstate_wishful &= ~mcSprint;
+		m_bGamepadSprint = false;
+		m_bGamepadSprintPending = false;
+	}
 
 	bool AnyAction() { return (mstate_real & mcAnyAction) != 0; };
 	bool AnyMove() { return (mstate_real & mcAnyMove) != 0; };
@@ -611,6 +616,50 @@ private:
 
 public:
 	Fvector GetMovementSpeed() { return NET_SavedAccel; };
+
+	// C2.1: прототип, настройки — Этап D
+	Fvector2 m_vGamepadMove = { 0.f, 0.f };
+	float m_fGamepadLastCalcYaw = 0.f;
+	bool m_bGamepadMoveActive = false;
+	void UpdateGamepadMoveInput();
+
+	// E1.1: режимы передвижения геймпада (D16, D42, D47)
+	bool m_bGamepadSprint = false;
+	// FIX-LIVE2 п.14 (Миша 2026-11-16): стик отпущен в центр на бегу — просьба о беге �
+	// отклонён (не назад) — бег продолжается. Снимают: стик назад, повторное нажатие LS, присед, клавиатура, StopSprint.
+	bool m_bGamepadSprintPending = false;
+	// FIX-LIVE3 п.7 (Миша 2026-11-16): отпустил стик / остановился — бег снимается. Просьба живёт только
+	// короткое окно (переброс стика через центр), дольше — бег выключен до нового нажатия LS.
+	u32 m_dwGamepadSprintPendingUntil = 0;
+	u32 m_dwGamepadSprintLowSince = 0; // FIX-LIVE4: с какого момента |LS| ниже порога бега
+	float m_fGamepadMoveRawMag = 0.f; // FIX-LIVE5: физический наклон LS (до мёртвой зоны и кривой), 0..1
+	bool m_bGamepadCrouch = false;
+	bool m_bGamepadLowCrouch = false;
+
+	void SetGamepadSprintToggle();
+	void SetGamepadCrouchToggle();
+	void SetGamepadLowCrouchHold();
+	void ApplyGamepadPostureToWishful();
+	void ResetGamepadMovementLatches();
+
+	bool IsGamepadSprintActive() const { return m_bGamepadSprint; }
+	bool IsGamepadCrouchActive() const { return m_bGamepadCrouch; }
+	bool IsGamepadLowCrouchActive() const { return m_bGamepadLowCrouch; }
+
+	static bool EvaluateGamepadSprintCone(float gx, float gy, float gpMag, float& outVx, float& outVz);
+	static void EvaluateGamepadLadderStick(float gx, float gy, float& outVx, float& outVz, u32& inOutGpFlags);
+	static void StepGamepadPostureState(bool isHoldAction,
+	                                    bool isSprintAction,
+	                                    bool& inOutCrouch,
+	                                    bool& inOutLowCrouch,
+	                                    bool& inOutSprint,
+	                                    u32& inOutWishful);
+
+	// C3.1: прототип, настройки — Этап D
+	void IR_OnGamepadLook(float rx, float ry, float dt);
+	void UpdateGamepadLookInput(float dt);
+	// E4.1: поворот камеры от помощи прицеливания (рад)
+	void ApplyGamepadAimAssistDelta(float yaw, float pitch);
 	//////////////////////////////////////////////////////////////////////////
 	// User input/output
 	//////////////////////////////////////////////////////////////////////////
@@ -954,6 +1003,7 @@ private:
 	bool m_inventory_disabled;
 	//static CPhysicsShell		*actor_camera_shell;
 
+public:
 	IC u32 get_state() const
 	{
 		return this->mstate_real;
@@ -972,6 +1022,9 @@ private:
 	IC void set_state_wishful(u32 state)
 	{
 		mstate_wishful = state;
+		m_bGamepadCrouch = (state & mcCrouch) != 0;
+		m_bGamepadLowCrouch = ((state & (mcCrouch | mcAccel)) == (mcCrouch | mcAccel));
+		m_bGamepadSprint = (state & mcSprint) != 0;
 	}
 
 public:

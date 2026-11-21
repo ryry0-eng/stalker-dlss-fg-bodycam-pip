@@ -7,6 +7,7 @@
 //#include "ai/stalker/ai_stalker.h"
 //#include "Actor.h"
 #include "../xrEngine/gamemtllib.h"
+#include "../xrEngine/xr_input.h" // MT-MAY: IsGamepadActiveSource для C2.1
 //#include "level.h"
 
 //const float JUMP_HIGHT=0.5;
@@ -197,6 +198,12 @@ void SPHCharacterRestrictor::SetMaterial(u16 material)
 
 void CPHActorCharacter::SetAcceleration(Fvector accel)
 {
+	// C2.1: прототип, настройки — Этап D. MT-MAY: мелкие пороги только при активном геймпаде,
+	// с клавиатурой/мышью — исходные 0.05/0.5, как в оригинальной игре.
+	const bool gp_active = pInput && pInput->IsGamepadActiveSource();
+	const float GAMEPAD_ACCEL_DIR_EPS = gp_active ? 0.005f : 0.05f;
+	const float GAMEPAD_ACCEL_MAG_EPS = gp_active ? 0.05f : 0.5f;
+
 	Fvector cur_a, input_a;
 	float cur_mug, input_mug;
 	cur_a.set(m_acceleration);
@@ -205,7 +212,7 @@ void CPHActorCharacter::SetAcceleration(Fvector accel)
 	input_a.set(accel);
 	input_mug = accel.magnitude();
 	if (!fis_zero(input_mug))input_a.mul(1.f / input_mug);
-	if (!cur_a.similar(input_a, 0.05f) || !fis_zero(input_mug - cur_mug, 0.5f))
+	if (!cur_a.similar(input_a, GAMEPAD_ACCEL_DIR_EPS) || !fis_zero(input_mug - cur_mug, GAMEPAD_ACCEL_MAG_EPS))
 		inherited::SetAcceleration(accel);
 }
 

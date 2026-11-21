@@ -1,5 +1,6 @@
 #include "pch_script.h"
 #include "uigamesp.h"
+#include "GamepadContextDispatcher.h"
 #include "actor.h"
 #include "level.h"
 #include "../xrEngine/xr_input.h"
@@ -347,6 +348,7 @@ bool g_block_pause = false;
 
 void CChangeLevelWnd::Show()
 {
+	CGamepadContextDispatcher::Instance().ConsumeAllCurrentlyHeldButtons();
 	m_messageBox->InitMessageBox(m_b_allow_change_level
 		                             ? "message_box_change_level"
 		                             : "message_box_change_level_disabled");

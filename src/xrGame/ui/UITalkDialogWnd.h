@@ -63,7 +63,23 @@ public:
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 
+	// INV-REWORK-21 (диалог Д1, Миша 2026-11-12): выбор реплик геймпадом без курсора.
+	// Выбранная реплика сдвигается вправо (плавно), остальные стоят; курсор UI ставится на выбранную (белый hover и клик A).
+	void GpStep(int dir);                         // -1 вверх / +1 вниз, с зажимом по краям
+	void GpReset();                               // мышь/клавиатура: вернуть реплики в исходное положение и цвет
+	void GpUpdate(float dtMs, float rsY);         // каждый кадр: сдвиг, видимость выбранной, RS-прокрутка истории (пиксели)
+	bool GpSelectedCenter(Fvector2& out);         // центр выбранной реплики в экранных координатах UI
+	bool GpHasQuestions();
+	void GpGetListRect(Frect& out);               // прямоугольник списка ответов (для строки подсказок)
+	void GpShowHints(bool on);                    // INV-REWORK-22: строка подсказок внутри окна (значок + подпись), поверх всего
 private:
+	void GpInitHints();
+	CUIStatic* m_gpHintIcon[4] = {};
+	CUITextWnd* m_gpHintText[4] = {};
+	bool m_gpHintsShown = false;
+	int m_gpSel = 0;
+	float m_gpBaseX = -1.0f;
+	float m_gpAnsAccum = 0.0f;
 	CUIScrollView* UIQuestionsList;
 	CUIScrollView* UIAnswersList;
 

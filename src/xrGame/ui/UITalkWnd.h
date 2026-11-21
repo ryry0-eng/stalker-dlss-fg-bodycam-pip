@@ -71,6 +71,7 @@ public:
 	void AddQuestion(const shared_str& text, const shared_str& id, int number, bool b_finalizer);
 	void AddAnswer(const shared_str& text, LPCSTR SpeakerName);
 	bool b_disable_break;
+	CUITalkDialogWnd* GetDialogWnd() { return UITalkDialogWnd; } // INV-REWORK-21: выбор реплик геймпадом
 protected:
 	CUITalkDialogWnd* UITalkDialogWnd;
 

@@ -35,6 +35,7 @@
 #include "../xrengine/xr_collide_form.h"
 #include "script_attachment_manager.h"
 #include "player_hud.h"
+#include "PauseTokenManager.h"
 extern MagicBox3 MagicMinBox(int iQuantity, const Fvector* akPoint);
 
 #pragma warning(push)
@@ -144,6 +145,7 @@ void CGameObject::net_Destroy()
 	else
 	{
 		g_pGameLevel->Objects.net_Unregister(this);
+		CPauseTokenManager::Instance().OnObjectNetDestroy(ID());
 	}
 
 	if (this == Level().CurrentEntity())
@@ -379,7 +381,10 @@ BOOL CGameObject::net_Spawn(CSE_Abstract* DC)
 
 	setReady(TRUE);
 	if (!demo_spectator)
+	{
 		g_pGameLevel->Objects.net_Register(this);
+		CPauseTokenManager::Instance().OnObjectNetSpawn(ID());
+	}
 
 	m_server_flags.one();
 	if (O)

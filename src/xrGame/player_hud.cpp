@@ -1480,7 +1480,12 @@ void player_hud::finalize_hud_pose(const HudPoseFrame& frame)
 			continue;
 		}
 
-		anm->anm->Update(Device.fTimeDelta);
+		{
+			// FIX-LIVE1: hand movement layers scale with left-stick tilt (idle unchanged)
+			extern float g_gp_move_anim_k;
+			const bool idleLayer = (anm == m_movement_layers[eIdle] || anm == m_movement_layers[eAimIdle]);
+			anm->anm->Update(Device.fTimeDelta * (idleLayer ? 1.f : g_gp_move_anim_k));
+		}
 		if(nativeMovementInfluence<=0.f)continue;
 
 		if (anm->blend_amount[0] == anm->blend_amount[1])

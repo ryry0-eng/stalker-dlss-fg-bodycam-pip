@@ -243,6 +243,15 @@ bool CUIXmlInit::InitCheck(CUIXml& xml_doc, LPCSTR path, int index, CUICheckButt
 
 	pWnd->InitCheckButton(pWnd->GetWndPos(), pWnd->GetWndSize(), texture);
 
+	// MENU-FOCUS-5 P14: Settings/MCM checkbox ("elements:check", y=8 h=30) shows its square at 14..45 of 58 texels,
+	// i.e. 3.26 UI below the caption center ("elements:cap" y=5 h=30). Raise the whole widget (mouse hit area too).
+	if (0 == xr_strcmp(path, "elements:check") && texture && strstr(texture, "ui_inGame2_checkbox"))
+	{
+		Fvector2 pos = pWnd->GetWndPos();
+		pos.y -= 3.26f;
+		pWnd->SetWndPos(pos);
+	}
+
 	u32 color;
 	strconcat(sizeof(buf), buf, path, ":text_color:e");
 	if (xml_doc.NavigateToNode(buf, index))

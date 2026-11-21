@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "GpHintXray.h"
 #include <dinput.h>
 #include "../xrEngine/xr_ioconsole.h"
 #include "entity_alive.h"
@@ -23,6 +24,7 @@
 #include "../xrEngine/xr_input.h"
 #include "saved_game_wrapper.h"
 #include "ui\UIPdaWnd.h"
+#include "PauseTokenManager.h"
 
 #include "../Include/xrRender/DebugRender.h"
 
@@ -166,6 +168,9 @@ void CLevel::IR_OnKeyboardPress(int key)
 
 	bool b_ui_exist = (!!CurrentGameUI());
 
+	if (GpHintXray::OnKey(key)) // INV-REWORK-24: F8 hint x-ray (-dbg)
+		return;
+
 	EGameActions _curr = get_binded_action(key);
 
     // Script key callbacks run before CWeapon::Action. Some installed bore
@@ -278,23 +283,39 @@ void CLevel::IR_OnKeyboardPress(int key)
 
 	case kQUIT:
 		{
-		if (b_ui_exist && CurrentGameUI()->TopInputReceiver())
-		{
-			if(Device.Paused())
+			// C4.2 / C5.1: если активны токены паузы мода — закрываем верхнее окно и освобождаем верхний токен
+			// (если диалог ещё не освободил свой токен внутри HideDialog) без раннего Device.Pause(FALSE, ...)
+			if (CPauseTokenManager::Instance().Count() > 0)
 			{
-				// Снимаем паузу, через Esc
-				Device.Pause(FALSE, TRUE, TRUE, "kQUIT");
+				const u32 topBefore = CPauseTokenManager::Instance().TopTokenId();
+				if (b_ui_exist && CurrentGameUI()->TopInputReceiver())
+				{
+					CurrentGameUI()->TopInputReceiver()->HideDialog();
+				}
+				if (CPauseTokenManager::Instance().TopTokenId() == topBefore)
+				{
+					CPauseTokenManager::Instance().ReleaseTop("kQUIT");
+				}
 				return;
 			}
 
-			if (CurrentGameUI()->IR_UIOnKeyboardPress(key)) return; //special case for mp and main_menu
-			CurrentGameUI()->TopInputReceiver()->HideDialog();
-		}
-		else
-		{
-			Console->Execute("main_menu");
-		}
-		return;
+			if (b_ui_exist && CurrentGameUI()->TopInputReceiver())
+			{
+				if (Device.Paused())
+				{
+					// Снимаем паузу, через Esc
+					Device.Pause(FALSE, TRUE, TRUE, "kQUIT");
+					return;
+				}
+
+				if (CurrentGameUI()->IR_UIOnKeyboardPress(key)) return; //special case for mp and main_menu
+				CurrentGameUI()->TopInputReceiver()->HideDialog();
+			}
+			else
+			{
+				Console->Execute("main_menu");
+			}
+			return;
 		}
 		break;
 	};

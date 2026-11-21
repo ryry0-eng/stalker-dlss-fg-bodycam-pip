@@ -120,6 +120,7 @@ protected:
 		u32 m_dwMotionCurrTm;
 		u32 m_dwMotionStartTm;
 		u32 m_dwMotionEndTm;
+		float m_gp_move_k; // FIX-LIVE2 p.19: stick tempo applied to the running anm_idle_moving* clip (1 = none)
 		u32 m_startedMotionState;
 		u8 m_started_rnd_anim_idx;
 		bool m_bStopAtEndAnimIsRunning;
@@ -214,6 +215,7 @@ public:
 	virtual void PlayAnimIdleSprint();
 
 	virtual void UpdateCL();
+	void UpdateGamepadMoveTempo(); // FIX-LIVE2 p.19
 	virtual void renderable_Render(IDSGraphManager* DM);
 
 

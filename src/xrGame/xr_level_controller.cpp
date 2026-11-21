@@ -3,6 +3,7 @@
 #include "../xrEngine/xr_ioconsole.h"
 #include "../xrEngine/xr_input.h"
 #include "../xrEngine/xr_ioc_cmd.h"
+#include "../xrEngine/GamepadGlyphs.h"
 #include "xr_level_controller.h"
 #include "string_table.h"
 
@@ -485,6 +486,17 @@ EGameActions get_binded_action(int _dik)
 
 void GetActionAllBinding(LPCSTR _action, char* dst_buff, int dst_buff_sz)
 {
+	// D5.1: When active input source is Gamepad (D1.2), substitute button glyph/label
+	// from the active D4.1 binding layout; when KBM is active, keep original keyboard/mouse binding.
+	if (pInput && pInput->IsGamepadActiveSource() && _action && _action[0])
+	{
+		auto& glyphs = CGamepadGlyphManager::Instance();
+		glyphs.EnsureInitialized();
+		const bool useLocalized = (CStringTable::getPData() != nullptr);
+		if (glyphs.FormatEngineActionPrompt(_action, useLocalized, dst_buff, dst_buff_sz))
+			return;
+	}
+
 	int action_id = action_name_to_id(_action);
 	_binding* pbinding = &g_key_bindings[action_id];
 

@@ -8,6 +8,11 @@
 
 #pragma once
 
+IC bool CVisualMemoryManager::has_objects() const
+{
+	return (m_objects != 0);
+}
+
 IC const CVisualMemoryManager::VISIBLES& CVisualMemoryManager::objects() const
 {
 	return (*m_objects);

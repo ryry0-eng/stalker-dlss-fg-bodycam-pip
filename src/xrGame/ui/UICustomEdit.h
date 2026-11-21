@@ -45,6 +45,11 @@ public:
 	virtual CUIWindow* ui_cast_window() { return this; }
 	virtual CUIStatic* ui_cast_static() { return this; }
 
+	bool IsReadOnly() const { return m_read_mode; }
+	bool IsNumbersOnly() const { return m_numbers_only; }
+	bool IsFileNameMode() const { return m_fn_mode; }
+	bool HasInputFocus() const { return m_bInputFocus; }
+
 protected:
 	void Register_callbacks();
 
@@ -69,6 +74,8 @@ protected:
 	bool m_bInputFocus;
 	bool m_force_update;
 	bool m_read_mode;
+	bool m_numbers_only;
+	bool m_fn_mode;
 
 	CUICustomEdit* m_next_focus_capturer;
 };

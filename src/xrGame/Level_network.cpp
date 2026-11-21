@@ -18,6 +18,10 @@
 #include "file_transfer.h"
 #include "UI/UIGameTutorial.h"
 #include "ui/UIPdaWnd.h"
+#include "PauseTokenManager.h"
+#include "GamepadOnScreenKeyboard.h"
+#include "GamepadCalibrationWnd.h"
+#include "GamepadRemapWnd.h"
 #include "../xrNetServer/NET_AuthCheck.h"
 
 #include "../xrphysics/physicscommon.h"
@@ -119,10 +123,26 @@ void CLevel::remove_objects()
 
 extern CUISequencer* g_tutorial;
 extern CUISequencer* g_tutorial2;
+extern float sens_multiple;
+extern float scope_radius;
+extern int scope_2dtexactive;
 
 void CLevel::net_Stop()
 {
 	Msg("- Disconnect");
+
+	// C3.1: гарантированный сброс глобалов зума при выгрузке уровня / загрузке сейва из прицеливания
+	sens_multiple = 1.0f;
+	scope_radius = 0.0;
+	scope_2dtexactive = 0;
+
+	// C5.1: закрытие фокусного тестового окна до выгрузки диалогов и объектов
+	CPauseTokenManager::Instance().CloseFocusTestWindow();
+	// F5.1: закрытие экранной клавиатуры геймпада до выгрузки игрового интерфейса
+	CGamepadOnScreenKeyboardUI::Instance().CloseCancel("net_Stop");
+	// Закрытие окон калибровки и ремапа до удаления g_hud / CurrentGameUI (см. docs/kb/30-engine-review.md #1)
+	CGamepadCalibrationUI::Instance().Close("net_Stop");
+	CGamepadRemapUI::Instance().Close("net_Stop");
 
 	if (CurrentGameUI())
 	{
@@ -152,6 +172,7 @@ void CLevel::net_Stop()
 		SaveDemoInfo();
 
 	remove_objects();
+	CPauseTokenManager::Instance().ClearObjectInstanceGens();
 
 	//WARNING ! remove_objects() uses this flag, so position of this line must e here ..
 	game_configured = FALSE;

@@ -31,6 +31,9 @@ private:
 	CUIStatic* m_right_bottom_background;
 
 	CUIMapWnd* m_pMapWnd;
+public:
+	CUIMapWnd* GetMapWnd() const { return m_pMapWnd; } // MT-MAY: геймпадный доступ к карте
+private:
 	CUITaskItem* m_pStoryLineTaskItem;
 
 	CUI3tButton* m_BtnTaskListWnd;
@@ -102,6 +105,21 @@ public:
 	};
 
 	void Show_TaskListWnd(bool status);
+	UITaskListWnd* GetTaskListWnd() const { return m_task_wnd; }
+	UIMapLegend* GetMapLegendWnd() const { return m_map_legend_wnd; }
+	LPCSTR GetGamepadOverlayName() const;
+	void GatherGamepadFilterBarRects(xr_vector<Frect>& outRects) const;
+	void GatherGamepadOverlayTargets(xr_vector<Frect>& outRects) const;
+	bool CloseTopTaskOverlay();
+	bool ToggleTaskListWndGamepad(Fvector2* outSnapPos);
+	void GatherGamepadTaskTargets(xr_vector<Frect>& outRects) const;
+	bool HandleGamepadRightStick(float curX, float curY, int wheelDir);
+	void StepGamepadMapPan(float stickX, float stickY, bool bModifierHeld, float curX, float curY, u32 dtMs);
+	// FIX-LIVE3 p.21/22: D-pad up/down walks the task list (opens it if closed), one frame per row
+	// (name + "center on task" button); A = set active task + center the map on it, list closes.
+	bool GamepadTaskStep(int dir, Fvector2* outSnapPos);
+	bool GamepadTaskPick();
+	int m_gpTaskIdx = -1;
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 

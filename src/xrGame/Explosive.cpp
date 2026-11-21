@@ -37,6 +37,8 @@
 #include "profiler.h"
 
 #include "../Include/xrRender/Kinematics.h"
+#include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
 #define EFFECTOR_RADIUS 30.f
 const u16 TEST_RAYS_PER_OBJECT = 5;
 const u16 BLASTED_OBJ_PROCESSED_PER_FRAME = 3;
@@ -477,9 +479,17 @@ void CExplosive::Explode()
 		float dist_to_actor = pActor->Position().distance_to(pos);
 		float max_dist = EFFECTOR_RADIUS;
 		if (dist_to_actor < max_dist)
+		{
+			const float explFactor = (max_dist - dist_to_actor) / max_dist;
 			if (effector.effect_sect_name != "$no_effector"){
-				AddEffector(pActor, effExplodeHit, effector.effect_sect_name, (max_dist - dist_to_actor) / max_dist);
+				AddEffector(pActor, effExplodeHit, effector.effect_sect_name, explFactor);
 			}
+			// D5.2: канал взрыва рядом с локальным актором (масштаб пропорционален затуханию по расстоянию)
+			if (pInput && pInput->GetGamepadHaptics())
+			{
+				pInput->GetGamepadHaptics()->TriggerChannel(EGamepadHapticChannel::Explosion, std::clamp(explFactor, 0.15f, 1.35f), 0, "Explosive::Explode");
+			}
+		}
 	}
 }
 

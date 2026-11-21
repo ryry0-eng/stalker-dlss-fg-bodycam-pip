@@ -48,12 +48,14 @@ void CEffectorBobbing::SetState(u32 mstate, bool limping, bool ZoomMode)
 }
 
 extern float g_head_bob_factor;
+extern float g_gp_move_anim_k; // FIX-LIVE1 p.1: walk animation tempo follows left stick deflection
 BOOL CEffectorBobbing::ProcessCam(SCamEffectorInfo& info)
 {
     if(Bodycam::ReferenceActive()||(Actor()&&Actor()->cam_BodycamFootstepComposed())){
         fReminderFactor=0;return TRUE; // The Reference camera or the composing Classic footstep camera owns locomotion bob.
     }
-	fTime += Device.fTimeDelta;
+	// FIX-LIVE1 p.1: fTime is an animation phase clock; with a gamepad stick it runs at g_gp_move_anim_k
+	fTime += Device.fTimeDelta * ((dwMState & ACTOR_DEFS::mcAnyMove) ? g_gp_move_anim_k : 1.f);
 	if (dwMState & ACTOR_DEFS::mcAnyMove)
 	{
 		if (fReminderFactor < 1.f) fReminderFactor += SPEED_REMINDER * Device.fTimeDelta;

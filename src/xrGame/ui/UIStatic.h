@@ -148,6 +148,7 @@ protected:
 public:
 	xr_string m_TextureName;
 	CUILines* TextItemControl();
+	CUILines* GpTextControlIfAny() { return m_pTextControl; } // INV-REWORK-24: no lazy create
 	shared_str m_stat_hint_text;
 
 DECLARE_SCRIPT_REGISTER_FUNCTION

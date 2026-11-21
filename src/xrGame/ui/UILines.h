@@ -23,6 +23,9 @@ public:
 	CGameFont* GetFont() { return m_pFont; }
 	void SetTextAlignment(ETextAlignment al) { m_eTextAlign = al; }
 	ETextAlignment GetTextAlignment() { return m_eTextAlign; }
+	// INV-REWORK-24 hint x-ray: where Draw() puts the glyph cell / text anchor inside the window (UI units)
+	float GpTextTop() { return m_TextOffset.y + GetVIndentByAlign(); }
+	float GpTextIndent() const { return m_TextOffset.x + GetIndentByAlign(); }
 	void SetVTextAlignment(EVTextAlignment al) { m_eVTextAlign = al; }
 	EVTextAlignment GetVTextAlignment() { return m_eVTextAlign; }
 

@@ -68,6 +68,7 @@ public:
 	void add(const CHitObject& hit_object);
 
 public:
+	IC bool has_objects() const;
 	IC const HITS& objects() const;
 #ifdef USE_SELECTED_HIT
 	IC		const CHitObject	*hit				() const;

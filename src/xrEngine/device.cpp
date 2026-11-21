@@ -803,12 +803,16 @@ void CRenderDevice::FrameMove()
 }
 
 ENGINE_API BOOL bShowPauseString = TRUE;
+extern ENGINE_API int ps_gp_telemetry;
+
+// C4.1: прототип, настройки — Этап D
+static int s_last_snd_emitters = -1;
+// C4.2b: синхронное уведомление CPauseTokenManager о внешнем снятии паузы (таймера и/или звука)
+ENGINE_API void (*g_pPauseExternalUnpauseCallback)(BOOL bTimer, BOOL bSound, LPCSTR reason) = nullptr;
 
 void CRenderDevice::Pause(BOOL bOn, BOOL bTimer, BOOL bSound, LPCSTR reason)
 {
 	PROF_EVENT();
-
-	static int snd_emitters_ = -1;
 
 	if (g_bBenchmark)
 		return;
@@ -836,9 +840,9 @@ void CRenderDevice::Pause(BOOL bOn, BOOL bTimer, BOOL bSound, LPCSTR reason)
 
 		if (bSound && ::Sound)
 		{
-			snd_emitters_ = ::Sound->pause_emitters(true);
+			s_last_snd_emitters = ::Sound->pause_emitters(true);
 #ifdef DEBUG
-			// Log("snd_emitters_[true]",snd_emitters_);
+			// Log("snd_emitters_[true]",s_last_snd_emitters);
 #endif // DEBUG
 		}
 	}
@@ -852,11 +856,11 @@ void CRenderDevice::Pause(BOOL bOn, BOOL bTimer, BOOL bSound, LPCSTR reason)
 
 		if (bSound)
 		{
-			if (snd_emitters_ > 0) //avoid crash
+			if (s_last_snd_emitters > 0) //avoid crash
 			{
-				snd_emitters_ = ::Sound->pause_emitters(false);
+				s_last_snd_emitters = ::Sound->pause_emitters(false);
 #ifdef DEBUG
-				// Log("snd_emitters_[false]",snd_emitters_);
+				// Log("snd_emitters_[false]",s_last_snd_emitters);
 #endif
 			}
 			else
@@ -868,12 +872,40 @@ void CRenderDevice::Pause(BOOL bOn, BOOL bTimer, BOOL bSound, LPCSTR reason)
 		}
 	}
 
+	if ((bTimer || bSound) && ps_gp_telemetry)
+	{
+		LPCSTR safeReason = (reason && reason[0]) ? reason : "unknown";
+		Msg("* [Gamepad] CRenderDevice::Pause: bOn=%d bTimer=%d bSound=%d Paused=%d snd_emitters=%d dwTimeContinual=%u reason=\"%s\"",
+		    bOn ? 1 : 0, bTimer ? 1 : 0, bSound ? 1 : 0, Paused() ? 1 : 0, s_last_snd_emitters, dwTimeContinual, safeReason);
+		if (pInput)
+		{
+			string256 line;
+			xr_sprintf(line, sizeof(line), "device_pause_timer,%u,%d,%d,%d,%d,%d,%s",
+			           dwTimeContinual, bOn ? 1 : 0, bTimer ? 1 : 0, bSound ? 1 : 0, Paused() ? 1 : 0, s_last_snd_emitters, safeReason);
+			pInput->WriteGamepadTelemetryLine(line);
+		}
+	}
+
+	if (!bOn && (bTimer || bSound) && g_pPauseExternalUnpauseCallback)
+	{
+		LPCSTR safeReason = (reason && reason[0]) ? reason : "unknown";
+		if (xr_strcmp(safeReason, "gp_token") != 0)
+		{
+			g_pPauseExternalUnpauseCallback(bTimer, bSound, safeReason);
+		}
+	}
+
 #endif
 }
 
 bool CRenderDevice::Paused()
 {
 	return g_pauseMngr().Paused();
+}
+
+int CRenderDevice::GetLastSndEmitters() const
+{
+	return s_last_snd_emitters;
 }
 
 void CRenderDevice::OnWM_Activate(WPARAM wParam, LPARAM lParam)

@@ -970,9 +970,9 @@ template <typename V, class _HashFcn = std::hash<V>, class _EqualKey = std::equa
 template <typename K, class V, class _HashFcn = std::hash<K>, class _EqualKey = std::equal_to<K>, typename allocator = xalloc<std::pair<K, V> > > class xr_hash_map : public std::hash_map < K, V, _HashFcn, _EqualKey, allocator > { public: u32 size() const { return (u32)__super::size(); } };
 template <typename K, class V, class _HashFcn = std::hash<K>, class _EqualKey = std::equal_to<K>, typename allocator = xalloc<std::pair<K, V> > > class xr_hash_multimap : public std::hash_multimap < K, V, _HashFcn, _EqualKey, allocator > { public: u32 size() const { return (u32)__super::size(); } };
 #else
-template <typename K, class V, class _Traits = stdext::hash_compare<K, std::less<K>>, typename allocator = xalloc<std::
+template <typename K, class V, class _Hasher = std::hash<K>, class _Keyeq = std::equal_to<K>, typename allocator = xalloc<std::
 	          pair<const K, V>>>
-class xr_hash_map : public stdext::hash_map<K, V, _Traits, allocator>
+class xr_hash_map : public std::unordered_map<K, V, _Hasher, _Keyeq, allocator>
 {
 public:
 	u32 size() const { return (u32)__super::size(); }

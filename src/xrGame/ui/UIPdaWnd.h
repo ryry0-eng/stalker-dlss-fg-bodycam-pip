@@ -105,6 +105,25 @@ public:
 	void UpdatePda();
 	void UpdateRankingWnd();
 	void ResetCursor();
+
+	bool CycleActiveTab(int delta);
+	bool CloseTopOverlay();
+	void ClosePdaFromGamepad();
+	void GatherGamepadTargets(xr_vector<Frect>& outRects) const;
+	bool HandleGamepadRightStick(float curX, float curY, int wheelDir);
+	void StepGamepadMapPan(float stickX, float stickY, bool bModifierHeld, float curX, float curY, u32 dtMs);
+	bool HandleGamepadButtonX(bool bModifierHeld, Fvector2* outSnapPos);
+	bool HandleGamepadButtonY();
+	bool HandleGamepadButtonView(Fvector2* outSnapPos);
+
+	CUITaskWnd* GetTaskWnd() const { return pUITaskWnd; }
+	CUIRankingWnd* GetRankingWnd() const { return pUIRankingWnd; }
+	CUILogsWnd* GetLogsWnd() const { return pUILogsWnd; }
+	void SetGamepadHintsHidden(bool hidden) { m_bGamepadHintsHidden = hidden; }
+	bool AreGamepadHintsHidden() const { return m_bGamepadHintsHidden; }
+	bool GpScrollAnalog(float dy_ui);
+
+	bool m_bGamepadHintsHidden = false;
 	float m_power;
 	Fvector2 last_cursor_pos;
 

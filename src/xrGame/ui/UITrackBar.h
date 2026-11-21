@@ -28,6 +28,8 @@ public:
 	void SetInvert(bool v) { m_b_invert = v; }
 	bool GetInvert() const { return m_b_invert; };
 	void SetStep(float step);
+	void StepValue(int direction, bool largeStep = false);
+	float GetSliderCenter();
 	void SetType(bool b_float) { m_b_is_float = b_float; };
 	bool GetCheck();
 	void SetCheck(bool b);

@@ -2,6 +2,7 @@
 
 #include "UICustomEdit.h"
 #include "UILines.h"
+#include "../GamepadOnScreenKeyboard.h"
 
 #include "../../xrEngine/line_edit_control.h"
 #include "../../xrEngine/xr_input.h"
@@ -20,6 +21,8 @@ CUICustomEdit::CUICustomEdit()
 	m_out_str[0] = NULL;
 	m_dx_cur = 0.0f;
 	m_read_mode = false;
+	m_numbers_only = false;
+	m_fn_mode = false;
 	m_force_update = true;
 	m_last_key_state_time = 0;
 	m_next_focus_capturer = NULL;
@@ -28,6 +31,7 @@ CUICustomEdit::CUICustomEdit()
 
 CUICustomEdit::~CUICustomEdit()
 {
+	CGamepadOnScreenKeyboardUI::Instance().OnTargetEditDestroyed(this);
 	xr_delete(m_editor_control);
 }
 
@@ -54,6 +58,8 @@ void CUICustomEdit::Register_callbacks()
 
 void CUICustomEdit::Init(u32 max_char_count, bool number_only_mode, bool read_mode, bool fn_mode)
 {
+	m_numbers_only = number_only_mode;
+	m_fn_mode = fn_mode;
 	if (read_mode)
 	{
 		m_editor_control->init(max_char_count, text_editor::im_read_only);
@@ -125,6 +131,12 @@ bool CUICustomEdit::OnMouseAction(float x, float y, EUIMessages mouse_action)
 	{
 		GetParent()->SetKeyboardCapture(this, true);
 		m_bInputFocus = true;
+	}
+
+	if ((mouse_action == WINDOW_LBUTTON_DOWN || mouse_action == WINDOW_LBUTTON_DB_CLICK) &&
+	    !m_read_mode && pInput && pInput->IsGamepadActiveSource())
+	{
+		CGamepadOnScreenKeyboardUI::Instance().OpenForEditBox(this, "editbox_mouse_click");
 	}
 	return false;
 }
@@ -335,8 +347,12 @@ void CUICustomEdit::press_tab()
 
 void CUICustomEdit::CaptureFocus(bool bCapture)
 {
-	if (bCapture)
-		GetParent()->SetKeyboardCapture(this, true);
+	if (GetParent())
+		GetParent()->SetKeyboardCapture(this, bCapture);
 
 	m_bInputFocus = bCapture;
+	if (bCapture && !m_read_mode && pInput && pInput->IsGamepadActiveSource())
+	{
+		CGamepadOnScreenKeyboardUI::Instance().OpenForEditBox(this, "editbox_capture_focus");
+	}
 }

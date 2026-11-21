@@ -1303,6 +1303,9 @@ void CLevel::OnRender()
 
 				if (pda->IsEnabled() && is_top && !Console->bVisible)
 				{
+					if (!cursor->IsVisible())
+						cursor->Show();
+
 					if (need_reset)
 					{
 						need_reset = false;

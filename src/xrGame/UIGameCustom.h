@@ -31,6 +31,12 @@ struct StaticDrawableWrapper : public IPureDestroyableObject
 	float m_endTime;
 	shared_str m_name;
 	mutable luabind::weak_ref m_lua_instance_ref;
+	// MENU-FOCUS P16: optional fade (xml attributes fade_in / fade_out, seconds); only alpha changes.
+	float m_startTime;
+	float m_fadeIn;
+	float m_fadeOut;
+	u32 m_baseTextureColor;
+	u32 m_baseTextColor;
 
 	StaticDrawableWrapper();
 	virtual void destroy();
@@ -99,6 +105,7 @@ class CUIGameCustom :
 protected:
 	CUIWindow* Window;
 	CUIXml* MsgConfig;
+	CUIXml* GpMsgConfig; // MENU-FOCUS P16: ui_gp_toasts.xml (mod statics that override ui_custom_msgs.xml)
 	xr_vector<StaticDrawableWrapper*> CustomStatics;
 	// captions are mutated by game logic and drawn by the render thread, guard every access
 	xrCriticalSection m_customs_lock;

@@ -28,8 +28,13 @@
 #include "xrserver_objects_alife_monsters.h"
 #include "../xrServerEntities/xrServer_Object_Base.h"
 #include "UI/UIGameTutorial.h"
+#include "PauseTokenManager.h"
+#include "GamepadOnScreenKeyboard.h"
+#include "GamepadCalibrationWnd.h"
+#include "GamepadRemapWnd.h"
 
 #include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
 
 #ifndef MASTER_GOLD
 #	include "custommonster.h"
@@ -162,11 +167,15 @@ void CGamePersistent::OnAppStart()
 	m_pUI_core = xr_new<ui_core>();
 	m_pMainMenu = xr_new<CMainMenu>();
 	m_pWallmarksManager = xr_new<ScriptWallmarksManager>();
+	CPauseTokenManager::Instance().EnsureInputSourceCallbackRegistered();
 }
 
 
 void CGamePersistent::OnAppEnd()
 {
+	if (pInput && pInput->GetGamepadHaptics())
+		pInput->GetGamepadHaptics()->StopAll("OnAppEnd");
+
 	if (m_pMainMenu->IsActive())
 		m_pMainMenu->Activate(false);
 
@@ -188,6 +197,11 @@ void CGamePersistent::Start(LPCSTR op)
 
 void CGamePersistent::Disconnect()
 {
+	if (pInput && pInput->GetGamepadHaptics())
+		pInput->GetGamepadHaptics()->StopAll("Disconnect");
+
+	CPauseTokenManager::Instance().ReleaseAll("Disconnect");
+
 	// destroy ambient particles
 	Particles::Details::Destroy(ambient_particles);
 
@@ -201,6 +215,9 @@ void CGamePersistent::Disconnect()
 
 void CGamePersistent::OnGameStart()
 {
+	if (pInput && pInput->GetGamepadHaptics())
+		pInput->GetGamepadHaptics()->StopAll("OnGameStart");
+
 	inherited::OnGameStart();
 	UpdateGameType();
 }
@@ -270,6 +287,9 @@ void CGamePersistent::UpdateGameType()
 
 void CGamePersistent::OnGameEnd()
 {
+	if (pInput && pInput->GetGamepadHaptics())
+		pInput->GetGamepadHaptics()->StopAll("OnGameEnd");
+
 	inherited::OnGameEnd();
 
 	xr_delete(g_stalker_animation_data_storage);
@@ -706,6 +726,8 @@ void CGamePersistent::OnFrame()
 	if (!m_pMainMenu->IsActive())
 		m_pMainMenu->DestroyInternal(false);
 
+	CPauseTokenManager::Instance().OnFrame();
+
 	if (!g_pGameLevel) return;
 	if (!g_pGameLevel->bReady) return;
 
@@ -870,11 +892,27 @@ bool CGamePersistent::OnModelLoadFatal(LPCSTR message)
 #include "ui/UIMainIngameWnd.h"
 #include "ui/UIPdaWnd.h"
 
+extern float sens_multiple;
+extern float scope_radius;
+extern int scope_2dtexactive;
+
 void CGamePersistent::OnEvent(EVENT E, u64 P1, u64 P2)
 {
 	if (E == eQuickLoad)
 	{
 		PROF_EVENT("eQuickLoad");
+		// CR1-07: match CLevel::net_Stop teardown on same-level F9 reload (zoom globals, singleton modals, sessionGen)
+		sens_multiple = 1.0f;
+		scope_radius = 0.0f;
+		scope_2dtexactive = 0;
+
+		if (pInput && pInput->GetGamepadHaptics())
+			pInput->GetGamepadHaptics()->StopAll("eQuickLoad");
+		CPauseTokenManager::Instance().CloseFocusTestWindow();
+		CGamepadOnScreenKeyboardUI::Instance().CloseCancel("eQuickLoad");
+		CGamepadCalibrationUI::Instance().Close("eQuickLoad");
+		CGamepadRemapUI::Instance().Close("eQuickLoad");
+		CPauseTokenManager::Instance().ReleaseAll("eQuickLoad");
 		if (Device.Paused())
 			Device.Pause(FALSE, TRUE, TRUE, "eQuickLoad");
 
@@ -894,6 +932,7 @@ void CGamePersistent::OnEvent(EVENT E, u64 P1, u64 P2)
 		LPSTR saved_name = (LPSTR)(P1);
 
 		Level().remove_objects();
+		CPauseTokenManager::Instance().ClearObjectInstanceGens();
 		game_sv_Single* game = smart_cast<game_sv_Single*>(Level().Server->game);
 		R_ASSERT(game);
 		game->restart_simulator(saved_name);

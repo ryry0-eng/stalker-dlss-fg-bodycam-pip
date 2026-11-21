@@ -144,7 +144,6 @@ bool IGame_Level::Load(u32 dwNum)
 	// Done
 	FS.r_close(LL_Stream);
 	bReady = true;
-	if (!g_dedicated_server) IR_Capture();
 #ifndef DEDICATED_SERVER
 	Device.seqRender.Add(this);
 #endif

@@ -7,6 +7,9 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "pch_script.h"
+#include "MainMenu.h"
+#include "GamepadOnScreenKeyboard.h"
+#include "ui/UICustomEdit.h"
 #include "level.h"
 #include "actor.h"
 #include "script_game_object.h"
@@ -44,6 +47,13 @@
 #include "ui\UIPdaWnd.h"
 #include "ui\UITaskWnd.h"
 #include "ui\UIMapWnd.h"
+#include "ui\UIMapLegend.h"
+#include "ui\UIRankingWnd.h"
+#include "ui\UISecondTaskWnd.h"
+#include "ui\UIScrollView.h"
+#include "ui\UICheckButton.h"
+#include "ui\UI3tButton.h"
+#include "GamepadContextDispatcher.h"
 #include "raypick.h"
 #include "../xrcdb/xr_collide_defs.h"
 #include "../xrEngine/Rain.h"
@@ -54,6 +64,7 @@
 #include "xr_level_controller.h"
 #include "../xrEngine/GameMtlLib.h"
 #include "../xrEngine/xr_input.h"
+#include "../xrEngine/GamepadHaptics.h"
 #include "../xrXMLParser/xrXMLParser.h"
 #include "script_ini_file.h"
 #include "EffectorBobbing.h"
@@ -802,6 +813,257 @@ bool is_input_captured()
 	CUIGameCustom* ui = CurrentGameUI();
 	return ui && ui->TopInputReceiver() != NULL;
 }
+
+bool gamepad_is_top_dialog(CUIWindow* window)
+{
+    auto* ui = CurrentGameUI();
+    auto* menu = smart_cast<CMainMenu*>(g_pGamePersistent ? g_pGamePersistent->m_pMainMenu : nullptr);
+    auto* holder = menu && menu->IsActive() ? static_cast<CDialogHolder*>(menu) : static_cast<CDialogHolder*>(ui);
+    return window && holder && holder->TopInputReceiver() == window;
+}
+
+extern int ps_gp_osk_enabled;
+
+bool gamepad_osk_enabled()
+{
+    return ps_gp_osk_enabled != 0;
+}
+
+bool gamepad_new_game_keyboard(CUIWindow* window)
+{
+    auto* edit = smart_cast<CUICustomEdit*>(window);
+    return edit && CGamepadOnScreenKeyboardUI::Instance().OpenForEditBox(edit, "new_game_name");
+}
+
+LPCSTR gamepad_pda_map(LPCSTR cmd)
+{
+	if (!cmd || !cmd[0])
+		return "";
+	if (0 == xr_strcmp(cmd, "filters_mode:0"))
+	{
+		CGamepadContextDispatcher::Instance().SetPdaMapFiltersMode(false);
+		return "1";
+	}
+	CUIGameCustom* ui = CurrentGameUI();
+	if (!ui || !ui->GetPdaMenu().IsShown())
+		return "";
+	CUIPdaWnd& pda = ui->GetPdaMenu();
+	LPCSTR actSec = pda.GetActiveSection();
+	if (!actSec || 0 != xr_strcmp(actSec, "eptTasks"))
+		return "";
+	CUITaskWnd* taskWnd = pda.GetTaskWnd();
+	if (!taskWnd || !taskWnd->IsShown())
+		return "";
+	CUIMapWnd* mapWnd = taskWnd->GetMapWnd();
+
+	static string512 s_pdaMapBuf;
+	if (0 == xr_strcmp(cmd, "zoom_in"))
+	{
+		if (mapWnd && mapWnd->IsShown())
+		{
+			mapWnd->UpdateZoom(true, true);
+			return "1";
+		}
+		return "";
+	}
+	if (0 == xr_strcmp(cmd, "zoom_out"))
+	{
+		if (mapWnd && mapWnd->IsShown())
+		{
+			mapWnd->UpdateZoom(false, true);
+			return "1";
+		}
+		return "";
+	}
+	if (0 == xr_strcmp(cmd, "center"))
+	{
+		if (mapWnd && mapWnd->IsShown())
+		{
+			mapWnd->ViewActor();
+			return "1";
+		}
+		return "";
+	}
+	if (0 == xr_strcmp(cmd, "menu"))
+	{
+		Fvector2 snap = { -1.0f, -1.0f };
+		if (mapWnd && mapWnd->IsShown() && mapWnd->HandleGamepadContextMenuOrCenter(true, &snap))
+		{
+			if (snap.x >= 0.0f && snap.y >= 0.0f)
+				CGamepadContextDispatcher::Instance().SnapPdaCursor(snap);
+			return "1";
+		}
+		return "";
+	}
+	if (0 == xr_strcmp(cmd, "task_pick"))
+	{
+		// FIX-LIVE3 p.22: A in the task list = make the task active + centre the map on it
+		return taskWnd->GamepadTaskPick() ? "1" : "";
+	}
+	if (0 == xr_strcmp(cmd, "tasks"))
+	{
+		Fvector2 snap = { -1.0f, -1.0f };
+		taskWnd->ToggleTaskListWndGamepad(&snap);
+		const bool open = (taskWnd->GetTaskListWnd() && taskWnd->GetTaskListWnd()->IsShown());
+		if (open && snap.x >= 0.0f && snap.y >= 0.0f)
+			CGamepadContextDispatcher::Instance().SnapPdaCursor(snap);
+		return "1";
+	}
+	if (0 == xr_strcmp(cmd, "legend"))
+	{
+		taskWnd->Switch_ShowMapLegend();
+		const bool open = (taskWnd->GetMapLegendWnd() && taskWnd->GetMapLegendWnd()->IsShown());
+		if (open && taskWnd->GetMapLegendWnd()->GetCloseBtn() && taskWnd->GetMapLegendWnd()->GetCloseBtn()->IsShown())
+		{
+			Frect r;
+			taskWnd->GetMapLegendWnd()->GetCloseBtn()->GetAbsoluteRect(r);
+			CGamepadContextDispatcher::Instance().SnapPdaCursor(
+				Fvector2().set((r.x1 + r.x2) * 0.5f, (r.y1 + r.y2) * 0.5f));
+		}
+		return "1";
+	}
+	if (0 == xr_strcmp(cmd, "filters"))
+	{
+		xr_vector<Frect> rects;
+		taskWnd->GatherGamepadFilterBarRects(rects);
+		s_pdaMapBuf[0] = '\0';
+		size_t pos = 0;
+		for (size_t i = 0; i < rects.size(); ++i)
+		{
+			const Frect& r = rects[i];
+			const int n = xr_sprintf(s_pdaMapBuf + pos, sizeof(s_pdaMapBuf) - pos,
+			                         (i == 0) ? "%.1f,%.1f,%.1f,%.1f" : ";%.1f,%.1f,%.1f,%.1f",
+			                         r.x1, r.y1, r.x2, r.y2);
+			if (n <= 0)
+				break;
+			pos += static_cast<size_t>(n);
+			if (pos + 32 >= sizeof(s_pdaMapBuf))
+				break;
+		}
+		return s_pdaMapBuf;
+	}
+	if (0 == xr_strcmp(cmd, "filters_mode:1"))
+	{
+		CGamepadContextDispatcher::Instance().SetPdaMapFiltersMode(true);
+		return "1";
+	}
+	if (0 == xr_strcmp(cmd, "eye_home"))
+	{
+		const Fvector2 c = Fvector2().set(
+			(pda.m_cursor_box.x1 + pda.m_cursor_box.x2) * 0.5f,
+			(pda.m_cursor_box.y1 + pda.m_cursor_box.y2) * 0.5f);
+		CGamepadContextDispatcher::Instance().SnapPdaCursor(c);
+		return "1";
+	}
+	if (0 == xr_strcmp(cmd, "spot"))
+	{
+		if (mapWnd && mapWnd->IsShown())
+		{
+			if (CMapSpot* sp = mapWnd->FindGamepadSpotUnderCursor())
+			{
+				Frect r;
+				sp->GetAbsoluteRect(r);
+				xr_sprintf(s_pdaMapBuf, sizeof(s_pdaMapBuf), "%.1f,%.1f,%.1f,%.1f",
+				           (r.x1 + r.x2) * 0.5f, (r.y1 + r.y2) * 0.5f, r.width(), r.height());
+				return s_pdaMapBuf;
+			}
+		}
+		return "";
+	}
+	if (0 == xr_strcmp(cmd, "overlay"))
+	{
+		return taskWnd->GetGamepadOverlayName();
+	}
+	return "";
+}
+
+LPCSTR gamepad_pda_targets()
+{
+	static xr_string s_buf;
+	s_buf.clear();
+
+	CUIGameCustom* ui = CurrentGameUI();
+	if (!ui || !ui->GetPdaMenu().IsShown())
+		return "";
+	CUIPdaWnd& pda = ui->GetPdaMenu();
+	LPCSTR sec = pda.GetActiveSection();
+	if (!sec || !sec[0])
+		return "";
+
+	auto appendRect = [&](LPCSTR kind, float x1, float y1, float x2, float y2)
+	{
+		if (x2 - x1 <= 2.0f || y2 - y1 <= 2.0f)
+			return;
+		string128 item;
+		xr_sprintf(item, sizeof(item), "%s%s:%.1f,%.1f,%.1f,%.1f",
+		           s_buf.empty() ? "" : ";", kind, x1, y1, x2, y2);
+		s_buf += item;
+	};
+
+	auto appendScrollItems = [&](LPCSTR kind, CUIScrollView* sv)
+	{
+		if (!sv || !sv->IsShown())
+			return;
+		Frect svRect;
+		sv->GetAbsoluteRect(svRect);
+		for (u32 i = 0, n = sv->GetSize(); i < n; ++i)
+		{
+			CUIWindow* w = sv->GetItem(i);
+			if (!w || !w->IsShown())
+				continue;
+			Frect ir;
+			w->GetAbsoluteRect(ir);
+			const float cy = (ir.y1 + ir.y2) * 0.5f;
+			if (cy >= svRect.y1 && cy <= svRect.y2)
+			{
+				appendRect(kind, ir.x1, _max(ir.y1, svRect.y1), ir.x2, _min(ir.y2, svRect.y2));
+			}
+		}
+	};
+
+	if (0 == xr_strcmp(sec, "eptRanking"))
+	{
+		CUIRankingWnd* rw = pda.GetRankingWnd();
+		if (!rw || !rw->IsShown())
+			return "";
+		appendScrollItems("ach", rw->GetAchievementsList());
+		appendScrollItems("rank", rw->GetCocRankingList());
+		appendScrollItems("rank", rw->GetCocRankingActorView());
+		return s_buf.c_str();
+	}
+
+	if (0 == xr_strcmp(sec, "eptLogs"))
+	{
+		CUILogsWnd* lw = pda.GetLogsWnd();
+		if (!lw || !lw->IsShown())
+			return "";
+		CUIWindow* btns[4] = {
+			lw->GetFilterNews(),
+			lw->GetFilterTalk(),
+			lw->GetPrevPeriodBtn(),
+			lw->GetNextPeriodBtn()
+		};
+		for (CUIWindow* b : btns)
+		{
+			if (b && b->IsShown())
+			{
+				Frect r;
+				b->GetAbsoluteRect(r);
+				appendRect("logbtn", r.x1, r.y1, r.x2, r.y2);
+			}
+		}
+		return s_buf.c_str();
+	}
+
+	return "";
+}
+
+void gamepad_set_pda_hints_hidden(bool hidden)
+{
+	if (CUIGameCustom* ui = CurrentGameUI())
+		ui->GetPdaMenu().SetGamepadHintsHidden(hidden);
+}
+
 
 void spawn_phantom(const Fvector& position)
 {
@@ -1987,6 +2249,458 @@ bool only_movement_allowed()
 	return g_block_all_except_movement;
 }
 
+// D1.2: экспорт текущего источника ввода в Lua (для gp_bridge и UI)
+#include "GamepadContextDispatcher.h"
+#include "../xrEngine/GamepadGlyphs.h"
+#include "../xrEngine/GamepadErrorGuard.h"
+
+bool gp_write_last_error_log_script(LPCSTR stage_tag, LPCSTR error_detail, LPCSTR context_name, LPCSTR recovery_action)
+{
+	const LPCSTR effectiveCtx = (context_name && context_name[0])
+	                                ? context_name
+	                                : CGamepadContextDispatcher::GetContextName(CGamepadContextDispatcher::Instance().GetCurrentContext());
+	CGamepadContextDispatcher::Instance().ConsumeAllCurrentlyHeldButtons();
+	return gperr::RecordSimpleGamepadError(stage_tag, error_detail, effectiveCtx, recovery_action, true);
+}
+
+bool gp_write_last_error_log_short_script(LPCSTR stage_tag, LPCSTR error_detail)
+{
+	return gp_write_last_error_log_script(stage_tag, error_detail, nullptr, nullptr);
+}
+
+LPCSTR get_active_input_source_script()
+{
+	if (!pInput)
+		return "kbm";
+	return CInput::GetInputSourceName(pInput->GetActiveInputSource());
+}
+
+bool is_gamepad_active_source_script()
+{
+	return pInput && pInput->IsGamepadActiveSource();
+}
+
+// MENU-FOCUS P16: weak menu pulse for scripts (quick save done / save refused).
+void gamepad_menu_pulse_script()
+{
+	if (pInput && pInput->GetGamepadHaptics())
+		pInput->GetGamepadHaptics()->PulseMenu("script");
+}
+
+// INV-REWORK-4: отказ в инвентаре — рамка трясётся (UICursor.cpp) + слабая вибрация
+extern u32 g_gpInvFocusDenyAt;
+// INV-REWORK-7: engine clips text under EnableClip ancestors (UIStatic.cpp push_text_scissor) ->
+// gp_inv_rework scrolls the item description pixel-smooth instead of whole lines
+bool gamepad_text_clip_script() { return true; }
+
+void gamepad_inv_focus_deny_script()
+{
+	g_gpInvFocusDenyAt = Device.dwTimeContinual ? Device.dwTimeContinual : 1;
+	if (pInput && pInput->GetGamepadHaptics())
+		pInput->GetGamepadHaptics()->PulseMenu("inv_deny");
+}
+
+u32 get_input_source_switches_1m_script()
+{
+	return pInput ? pInput->GetSourceSwitchesLastMinute() : 0;
+}
+
+// D3.2 (REC-4): приём флагов Lua-контекстов из gp_bridge.script при изменении
+void set_gamepad_lua_hints_script(bool mcm_bind,
+                                  bool fdda_dis,
+                                  bool sleep_info,
+                                  bool sleep_dlg,
+                                  int wheel_type,
+                                  int placement_state,
+                                  LPCSTR modal_tag)
+{
+	CGamepadContextDispatcher::Instance().SetLuaBridgeHintsBatch(
+		mcm_bind, fdda_dis, sleep_info, sleep_dlg, wheel_type, placement_state, modal_tag);
+}
+
+void set_gamepad_placement_keys_script(int dik_place, int dik_collision, int dik_align, int dik_controls)
+{
+	CGamepadContextDispatcher::Instance().SetLuaPlacementKeys(dik_place, dik_collision, dik_align, dik_controls);
+}
+
+LPCSTR get_gamepad_context_name_script()
+{
+	auto& disp = CGamepadContextDispatcher::Instance();
+	return CGamepadContextDispatcher::GetContextName(disp.GetCurrentContext());
+}
+
+// D5.1: экспорт набора глифов и подсказок кнопок в Lua
+LPCSTR get_gamepad_glyph_set_script()
+{
+	auto& glyphs = CGamepadGlyphManager::Instance();
+	glyphs.EnsureInitialized();
+	return CGamepadGlyphManager::GlyphSetToString(glyphs.GetEffectiveGlyphSet());
+}
+
+LPCSTR get_gamepad_glyph_override_script()
+{
+	auto& glyphs = CGamepadGlyphManager::Instance();
+	glyphs.EnsureInitialized();
+	return CGamepadGlyphManager::GlyphSetToString(glyphs.GetStyleOverride());
+}
+
+bool set_gamepad_glyph_override_script(LPCSTR style_name)
+{
+	auto& glyphs = CGamepadGlyphManager::Instance();
+	glyphs.EnsureInitialized();
+	return glyphs.SetStyleOverrideByName(style_name ? style_name : "auto", true);
+}
+
+LPCSTR get_gamepad_action_glyph_script(LPCSTR action_name)
+{
+	static string64 s_promptBuf = {};
+	s_promptBuf[0] = '\0';
+	auto& glyphs = CGamepadGlyphManager::Instance();
+	glyphs.EnsureInitialized();
+	const bool useLocalized = (CStringTable::getPData() != nullptr);
+	glyphs.FormatEngineActionPrompt(action_name ? action_name : "", useLocalized, s_promptBuf, sizeof(s_promptBuf));
+	return s_promptBuf;
+}
+
+LPCSTR get_gamepad_action_icon_script(LPCSTR action_name)
+{
+	auto& glyphs = CGamepadGlyphManager::Instance();
+	glyphs.EnsureInitialized();
+	return glyphs.GetEngineActionTextureId(action_name ? action_name : "");
+}
+
+// E5.2 (D37, D45): секция [wheel_slots] общего файла appdata\gamepad\profile.ltx.
+// Lua получает/отдаёт тело секции строкой; остальные секции файла (раскладка D4.1, калибровка D2.2,
+// вибрация D5.2, глифы D5.1) при записи сохраняются как есть. Запись атомарная (tmp + MoveFileEx).
+#include <fstream>
+#include <string>
+#include <vector>
+#include "../xrEngine/GamepadBindings.h"
+
+static bool wheel_slots_profile_path(string_path& out)
+{
+	if (!FS.path_exist("$app_data_root$"))
+		return false;
+	FS.update_path(out, "$app_data_root$", "gamepad\\profile.ltx");
+	return true;
+}
+
+static std::string wheel_slots_trim(const std::string& s)
+{
+	size_t b = 0, e = s.size();
+	while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r')) ++b;
+	while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) --e;
+	return s.substr(b, e - b);
+}
+
+// true, если строка — заголовок секции; name — её имя в нижнем регистре
+static bool wheel_slots_is_header(const std::string& raw, std::string& name)
+{
+	std::string t = wheel_slots_trim(raw);
+	if (t.size() < 3 || t.front() != '[')
+		return false;
+	const size_t close = t.find(']');
+	if (close == std::string::npos || close < 2)
+		return false;
+	name = wheel_slots_trim(t.substr(1, close - 1));
+	for (auto& ch : name)
+		if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+	return true;
+}
+
+LPCSTR gp_wheel_read_slots_script()
+{
+	static std::string s_body;
+	s_body.clear();
+	string_path path = {};
+	if (!wheel_slots_profile_path(path))
+		return "";
+	std::ifstream ifs(path, std::ios::binary);
+	if (!ifs)
+		return "";
+	std::string line, name;
+	bool in = false;
+	while (std::getline(ifs, line))
+	{
+		if (!line.empty() && line.back() == '\r')
+			line.pop_back();
+		if (wheel_slots_is_header(line, name))
+		{
+			in = (name == "wheel_slots");
+			continue;
+		}
+		if (in)
+		{
+			s_body += line;
+			s_body += "\n";
+		}
+	}
+	return s_body.c_str();
+}
+
+bool gp_wheel_write_slots_script(LPCSTR body)
+{
+	string_path path = {};
+	if (!wheel_slots_profile_path(path))
+		return false;
+	std::string reason;
+	if (gpbind::BindingProfileModel::IsPathForbiddenForWrite(path, &reason))
+	{
+		Msg("! [Gamepad] gp_wheel_write_slots refused path '%s': %s", path, reason.c_str());
+		return false;
+	}
+
+	std::vector<std::string> kept;
+	{
+		std::ifstream ifs(path, std::ios::binary);
+		std::string line, name;
+		bool skip = false;
+		while (ifs && std::getline(ifs, line))
+		{
+			if (!line.empty() && line.back() == '\r')
+				line.pop_back();
+			if (wheel_slots_is_header(line, name))
+				skip = (name == "wheel_slots");
+			if (!skip)
+				kept.push_back(line);
+		}
+	}
+
+	string_path dir = {};
+	xr_strcpy(dir, path);
+	if (char* slash = strrchr(dir, '\\'))
+	{
+		*slash = '\0';
+		CreateDirectoryA(dir, nullptr);
+	}
+
+	string_path tmp = {};
+	xr_sprintf(tmp, "%s.wheel.tmp", path);
+	{
+		std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+		if (!ofs)
+			return false;
+		for (const auto& l : kept)
+			ofs << l << "\n";
+		if (!kept.empty() && !kept.back().empty())
+			ofs << "\n";
+		ofs << "[wheel_slots]\n";
+		if (body && body[0])
+		{
+			ofs << body;
+			if (body[strlen(body) - 1] != '\n')
+				ofs << "\n";
+		}
+		ofs.flush();
+		if (!ofs.good())
+			return false;
+	}
+	if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+	{
+		DeleteFileA(tmp);
+		return false;
+	}
+	return true;
+}
+
+// E5.1 (D13, D14, D43, D45): экспорт диспетчера масштаба времени D43, токенов паузы C4.1 и сектора быстрого колеса в Lua
+#include "PauseTokenManager.h"
+
+u32 get_time_continual_script()
+{
+	return Device.dwTimeContinual;
+}
+
+float request_time_factor_script(LPCSTR tag, float factor)
+{
+	return CPauseTokenManager::Instance().RequestTimeFactor(tag, factor);
+}
+
+float release_time_factor_script(LPCSTR tag)
+{
+	return CPauseTokenManager::Instance().ReleaseTimeFactor(tag);
+}
+
+void reset_time_factors_script(LPCSTR reason)
+{
+	CPauseTokenManager::Instance().ResetAllTimeFactors(reason);
+}
+
+float get_effective_time_factor_script()
+{
+	return CPauseTokenManager::Instance().GetEffectiveTimeFactor();
+}
+
+float get_external_time_factor_script()
+{
+	return CPauseTokenManager::Instance().GetExternalTimeFactor();
+}
+
+u32 acquire_pause_token_script(LPCSTR tag)
+{
+	return CPauseTokenManager::Instance().Acquire(tag);
+}
+
+bool release_pause_token_script(u32 id)
+{
+	return CPauseTokenManager::Instance().Release(id);
+}
+
+void consume_all_gamepad_buttons_script()
+{
+	CGamepadContextDispatcher::Instance().ConsumeAllCurrentlyHeldButtons();
+}
+
+void reset_wheel_sector_state_script()
+{
+	CGamepadContextDispatcher::Instance().ResetWheelSectorState();
+}
+
+static gpmath::RadialSectorResult g_lastWheelSectorResult = {};
+
+int update_wheel_sector_script(int sector_count, int current_sector)
+{
+	g_lastWheelSectorResult =
+	    CGamepadContextDispatcher::Instance().UpdateWheelSectorFromRightStick(sector_count, current_sector);
+	return g_lastWheelSectorResult.selected_sector;
+}
+
+bool is_wheel_stick_active_script()
+{
+	return g_lastWheelSectorResult.stick_active;
+}
+
+float get_wheel_stick_angle_script()
+{
+	return g_lastWheelSectorResult.angle_rad;
+}
+
+LPCSTR get_wheel_time_mode_script()
+{
+	return CGamepadContextDispatcher::Instance().GetWheelTimeMode();
+}
+
+void set_wheel_time_mode_script(LPCSTR mode)
+{
+	CGamepadContextDispatcher::Instance().SetWheelTimeMode(mode);
+}
+
+u32 get_gamepad_session_gen_script()
+{
+	return CPauseTokenManager::Instance().GetSessionGen();
+}
+
+double get_gamepad_object_instance_gen_script(u16 object_id)
+{
+	return static_cast<double>(CPauseTokenManager::Instance().GetObjectInstanceGen(object_id));
+}
+
+bool validate_gamepad_stable_item_script(u32 session_gen, u16 object_id, double instance_gen)
+{
+	if (instance_gen <= 0.0)
+		return false;
+	CPauseTokenManager::StableItemID ref;
+	ref.session_gen  = session_gen;
+	ref.object_id    = object_id;
+	ref.instance_gen = static_cast<u64>(instance_gen);
+	return CPauseTokenManager::Instance().ResolveStableItem(ref) != nullptr;
+}
+
+bool is_gamepad_item_txn_locked_script(u16 object_id)
+{
+	return CPauseTokenManager::Instance().GetTxnDispatcher().IsObjectIdLockedInCategoryB(object_id);
+}
+
+// GPSET-2 phase 2: SDL3 active gamepad name, battery state/percent, and input source lock mode
+LPCSTR gamepad_get_active_name_script()
+{
+	return pInput ? pInput->GetActiveGamepadName() : "";
+}
+
+LPCSTR gamepad_get_power_info_script(int& out_percent)
+{
+	if (!pInput)
+	{
+		out_percent = -1;
+		return "disconnected";
+	}
+	return pInput->GetActiveGamepadPowerInfo(out_percent);
+}
+
+LPCSTR gamepad_get_power_state_script()
+{
+	int pct = -1;
+	return pInput ? pInput->GetActiveGamepadPowerInfo(pct) : "disconnected";
+}
+
+int gamepad_get_power_percent_script()
+{
+	int pct = -1;
+	if (pInput)
+		pInput->GetActiveGamepadPowerInfo(pct);
+	return pct;
+}
+
+LPCSTR get_gamepad_source_mode_script()
+{
+	return pInput ? CInput::GetSourceLockModeName(pInput->GetInputSourceLockMode()) : "auto";
+}
+
+bool set_gamepad_source_mode_script(LPCSTR mode_name)
+{
+	return pInput && pInput->SetInputSourceLockModeByName(mode_name ? mode_name : "auto", true, "lua_set_source_mode");
+}
+
+bool is_gamepad_only_mode_script()
+{
+	return pInput && pInput->IsGamepadOnlyMode();
+}
+
+void set_gamepad_only_mode_script(bool enabled)
+{
+	if (pInput)
+	{
+		pInput->SetInputSourceLockMode(
+		    enabled ? CInput::EInputSourceLockMode::GamepadOnly : CInput::EInputSourceLockMode::Auto,
+		    true,
+		    enabled ? "lua_gamepad_only_on" : "lua_gamepad_only_off");
+	}
+}
+
+extern float ps_gp_cursor_size;  // UICursor.cpp
+extern float ps_gp_cursor_speed; // UICursor.cpp
+
+bool gamepad_is_mouse_mode_script()
+{
+	return CGamepadContextDispatcher::Instance().IsGamepadMouseMode();
+}
+
+bool gamepad_set_mouse_mode_script(bool enabled)
+{
+	return CGamepadContextDispatcher::Instance().SetGamepadMouseMode(
+	    enabled, enabled ? "lua_set_mouse_mode_on" : "lua_set_mouse_mode_off");
+}
+
+float gamepad_get_cursor_size_script()
+{
+	return ps_gp_cursor_size;
+}
+
+void gamepad_set_cursor_size_script(float val)
+{
+	ps_gp_cursor_size = clampr(val, 0.5f, 3.0f);
+}
+
+float gamepad_get_cursor_speed_script()
+{
+	return ps_gp_cursor_speed;
+}
+
+void gamepad_set_cursor_speed_script(float val)
+{
+	ps_gp_cursor_speed = clampr(val, 0.4f, 2.5f);
+}
+
 void set_actor_allow_ladder(bool b)
 {
 	g_actor_allow_ladder = b;
@@ -2788,6 +3502,20 @@ void take_screenshot(LPCSTR path, Fvector2 dimensions, IRender_interface::DxEnco
 	Render->TakeScreenshot(path, dimensions, dx_encoding);
 }
 
+// REL1 / I2.1 (D64): Gamepad C++ <-> Lua API version & engine flavor query for gp_compat startup self-diagnostics.
+// Version format: MAJOR * 100 + MINOR (100 = ABI 1.0; breaking ABI change increments MAJOR -> 200).
+constexpr int kGamepadLuaApiVersion = 100;
+
+static int get_gamepad_api_version_script()
+{
+	return kGamepadLuaApiVersion;
+}
+
+static LPCSTR get_gamepad_engine_flavor_script()
+{
+	return "gamma-monolith-mt";
+}
+
 
 #pragma optimize("s",on)
 
@@ -3087,7 +3815,11 @@ void CLevel::script_register(lua_State* L)
 			def("iterate_attachments", &IterateAttachments),
 
 			def("patrol_path_add", &patrol_path_add),
-			def("patrol_path_remove", &patrol_path_remove)
+			def("patrol_path_remove", &patrol_path_remove),
+
+			// I2.1: Gamepad Engine API Version & Flavor
+			def("get_gamepad_api_version", &get_gamepad_api_version_script),
+			def("get_gamepad_engine_flavor", &get_gamepad_engine_flavor_script)
 		],
 
 		module(L, "actor_stats")
@@ -3274,6 +4006,65 @@ void CLevel::script_register(lua_State* L)
 		def("change_game_news_show_time", &change_game_news_show_time),
 		def("update_pda_news_from_uiwindow", &update_pda_news_from_uiwindow),
 
-        def("get_actor_alcohol", &GetActorAlcohol)
+        def("get_actor_alcohol", &GetActorAlcohol),
+        def("get_active_input_source", &get_active_input_source_script),
+        def("is_gamepad_active_source", &is_gamepad_active_source_script),
+        def("get_input_source_switches_1m", &get_input_source_switches_1m_script),
+        def("gamepad_menu_pulse", &gamepad_menu_pulse_script),
+        def("gamepad_inv_focus_deny", &gamepad_inv_focus_deny_script),
+        def("gamepad_text_clip", &gamepad_text_clip_script),
+        def("set_gamepad_lua_hints", &set_gamepad_lua_hints_script),
+        def("gamepad_is_top_dialog", &gamepad_is_top_dialog),
+        def("gamepad_new_game_keyboard", &gamepad_new_game_keyboard),
+        def("gamepad_osk_enabled", &gamepad_osk_enabled),
+        def("gamepad_pda_map", &gamepad_pda_map),
+        def("gamepad_pda_targets", &gamepad_pda_targets),
+        def("gamepad_set_pda_hints_hidden", &gamepad_set_pda_hints_hidden),
+        def("set_gamepad_placement_keys", &set_gamepad_placement_keys_script),
+        def("get_gamepad_context_name", &get_gamepad_context_name_script),
+        def("get_gamepad_glyph_set", &get_gamepad_glyph_set_script),
+        def("get_gamepad_glyph_override", &get_gamepad_glyph_override_script),
+        def("set_gamepad_glyph_override", &set_gamepad_glyph_override_script),
+        def("get_gamepad_action_glyph", &get_gamepad_action_glyph_script),
+        def("get_gamepad_action_icon", &get_gamepad_action_icon_script),
+        def("gp_wheel_read_slots", &gp_wheel_read_slots_script),
+        def("gp_wheel_write_slots", &gp_wheel_write_slots_script),
+        def("get_time_continual", &get_time_continual_script),
+        def("request_time_factor", &request_time_factor_script),
+        def("release_time_factor", &release_time_factor_script),
+        def("reset_time_factors", &reset_time_factors_script),
+        def("get_effective_time_factor", &get_effective_time_factor_script),
+        def("get_external_time_factor", &get_external_time_factor_script),
+        def("acquire_pause_token", &acquire_pause_token_script),
+        def("release_pause_token", &release_pause_token_script),
+        def("consume_all_gamepad_buttons", &consume_all_gamepad_buttons_script),
+        def("reset_wheel_sector_state", &reset_wheel_sector_state_script),
+        def("update_wheel_sector", &update_wheel_sector_script),
+        def("is_wheel_stick_active", &is_wheel_stick_active_script),
+        def("get_wheel_stick_angle", &get_wheel_stick_angle_script),
+        def("get_wheel_time_mode", &get_wheel_time_mode_script),
+        def("set_wheel_time_mode", &set_wheel_time_mode_script),
+        def("get_gamepad_session_gen", &get_gamepad_session_gen_script),
+        def("get_gamepad_object_instance_gen", &get_gamepad_object_instance_gen_script),
+        def("validate_gamepad_stable_item", &validate_gamepad_stable_item_script),
+        def("is_gamepad_item_txn_locked", &is_gamepad_item_txn_locked_script),
+        def("gp_write_last_error_log", &gp_write_last_error_log_script),
+        def("gp_write_last_error_log", &gp_write_last_error_log_short_script),
+        def("get_gamepad_api_version", &get_gamepad_api_version_script),
+        def("get_gamepad_engine_flavor", &get_gamepad_engine_flavor_script),
+        def("gamepad_get_active_name", &gamepad_get_active_name_script),
+        def("gamepad_get_power_info", &gamepad_get_power_info_script, pure_out_value<1>()),
+        def("gamepad_get_power_state", &gamepad_get_power_state_script),
+        def("gamepad_get_power_percent", &gamepad_get_power_percent_script),
+        def("get_gamepad_source_mode", &get_gamepad_source_mode_script),
+        def("set_gamepad_source_mode", &set_gamepad_source_mode_script),
+        def("is_gamepad_only_mode", &is_gamepad_only_mode_script),
+        def("set_gamepad_only_mode", &set_gamepad_only_mode_script),
+        def("gamepad_is_mouse_mode", &gamepad_is_mouse_mode_script),
+        def("gamepad_set_mouse_mode", &gamepad_set_mouse_mode_script),
+        def("gamepad_get_cursor_size", &gamepad_get_cursor_size_script),
+        def("gamepad_set_cursor_size", &gamepad_set_cursor_size_script),
+        def("gamepad_get_cursor_speed", &gamepad_get_cursor_speed_script),
+        def("gamepad_set_cursor_speed", &gamepad_set_cursor_speed_script)
 	];
 }

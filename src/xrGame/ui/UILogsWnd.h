@@ -85,6 +85,12 @@ public:
 
 	virtual CUIWindow* ui_cast_window() { return this; }
 
+	CUIScrollView* GetLogsList() const { return m_list; }
+	CUICheckButton* GetFilterNews() const { return m_filter_news; }
+	CUICheckButton* GetFilterTalk() const { return m_filter_talk; }
+	CUI3tButton* GetPrevPeriodBtn() const { return m_prev_period; }
+	CUI3tButton* GetNextPeriodBtn() const { return m_next_period; }
+
 protected:
 	void ReLoadNews();
 	void AddNewsItem(GAME_NEWS_DATA& news_data);

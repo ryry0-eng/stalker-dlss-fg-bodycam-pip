@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "UITalkDialogWnd.h"
+#include "../GpHintXray.h"
+#include "../string_table.h"
 
 #include "xrUIXmlParser.h"
 #include "UIXmlInit.h"
@@ -8,12 +10,15 @@
 #include "UITalkWnd.h"
 #include "UIInventoryUtilities.h"
 #include "UIBtnHint.h"
+#include "../ui_base.h"
 
 #include "../game_news.h"
 #include "../level.h"
 #include "../actor.h"
 #include "../alife_registry_wrappers.h"
 #include "dinput.h"
+#include "../../xrEngine/GamepadGlyphs.h"
+#include "../string_table.h"
 
 #define				TALK_XML				"talk.xml"
 
@@ -101,6 +106,7 @@ void CUITalkDialogWnd::InitTalkDialogWnd()
 	               CUIWndCallback::void_function(this, &CUITalkDialogWnd::OnQuestionClicked));
 	AddCallback(&UIToTradeButton, BUTTON_CLICKED,
 	            CUIWndCallback::void_function(this, &CUITalkDialogWnd::OnTradeClicked));
+	GpInitHints();
 	//	AddCallback					(&UIToExitButton,BUTTON_CLICKED,CUIWndCallback::void_function(this, &CUITalkDialogWnd::OnExitClicked));
 }
 
@@ -164,6 +170,297 @@ void CUITalkDialogWnd::SendMessage(CUIWindow* pWnd, s16 msg, void* pData)
 	CUIWndCallback::OnEvent(pWnd, msg, pData);
 }
 
+// ---- INV-REWORK-21: выбор реплик геймпадом ----
+namespace
+{
+	const float kGpShiftPx = 4.0f;  // на сколько выбранная реплика уезжает вправо (UI-пиксели 1024x768)
+}
+
+bool CUITalkDialogWnd::GpHasQuestions()
+{
+	return UIQuestionsList && UIQuestionsList->GetSize() > 0;
+}
+
+void CUITalkDialogWnd::GpStep(int dir)
+{
+	if (!UIQuestionsList)
+		return;
+	const int n = (int)UIQuestionsList->GetSize();
+	if (n <= 0)
+	{
+		m_gpSel = 0;
+		return;
+	}
+	m_gpSel = _max(0, _min(n - 1, m_gpSel + dir));
+}
+
+// INV-REWORK-22 (Миша 2026-11-12: «в диалоге с НПС нет подсказок»): строка подсказок — детьми этого окна, чтобы
+// рисоваться поверх него (Lua-окно в HUD рисуется под TalkMenu). Значки — графитовые круглые из атласа
+// ui_gp_xbox_graphite_p12 (как в нижней полосе инвентаря), квадратные в пикселях экрана. Подписи — cp1251 байтами \xNN
+// (INV-REWORK-24: литералы в UTF-8 исходнике без /utf-8 давали крякозябры; движок ждёт cp1251).
+namespace
+{
+	struct SGpHint { LPCSTR tex; LPCSTR id; LPCSTR fallback; };
+	const SGpHint kGpHints[4] = {
+		{ "ui_gp_xbox_south", "ui_gp_eng_talk_select", "\xC2\xFB\xE1\xF0\xE0\xF2\xFC" },     // A Выбрать
+		{ "ui_gp_xbox_east",  "ui_gp_eng_talk_exit",   "\xC2\xFB\xE9\xF2\xE8" },               // B Выйти
+		{ "ui_gp_xbox_west",  "ui_gp_eng_talk_trade",  "\xD2\xEE\xF0\xE3\xEE\xE2\xE0\xF2\xFC" }, // X Торговать
+		{ "ui_gp_xbox_rs",    "ui_gp_eng_talk_scroll", "\xCB\xE8\xF1\xF2\xE0\xF2\xFC" },     // RS Листать
+	};
+
+	LPCSTR ResolveTalkHintText(const SGpHint& h)
+	{
+		if (CStringTable::getPData())
+		{
+			const shared_str tr = CStringTable().translate(h.id);
+			if (tr.size() && 0 != xr_strcmp(tr.c_str(), h.id))
+				return tr.c_str();
+		}
+		return h.fallback;
+	}
+	// INV-REWORK-23 (Миша 2026-11-12, макет gp-screens): строка — в нижней светлой кромке окна диалога, справа.
+	// Кромка на кадре 2560x1080: y 1019..1049 px (середина 1034 px = 735,3 ед. UI), внутренний правый край рамки
+	// x 2520 px = 1008 ед.; строка кончается в 30 px от него. Значок 22 px, значок->подпись 11 px, шаг 30 px.
+	const float kGpHintFrameR = 1008.0f; // inner right edge of the dialog frame (UI units 1024x768)
+	const float kGpHintRightPx = 30.0f;  // row ends this many screen pixels (at 1080p) left of it
+	const float kGpHintCY = 735.3f;      // midline of the light bottom edge (UI units)
+	const float kGpHintIconPx = 22.0f;   // icon side in pixels at screen height 1080
+	const float kGpHintTextPx = 11.0f, kGpHintGapPx = 30.0f;
+	// W4-ICONS2-FIELD: Dot Marks (ui_gp_dm.xml, PAD=3 px around 22 px circle => 28 px sprite) & dynamic X caption
+	const float kGpHintPadPx = 3.0f;
+	const float kGpHintTexPx = kGpHintIconPx + 2.0f * kGpHintPadPx;
+
+	LPCSTR GpResolveHintTex(int idx)
+	{
+		CGamepadGlyphManager& gm = CGamepadGlyphManager::Instance();
+		LPCSTR tex = nullptr;
+		switch (idx)
+		{
+		case 0: tex = gm.GetButtonTextureId(gpbind::ButtonId::South); break;
+		case 1: tex = gm.GetButtonTextureId(gpbind::ButtonId::East);  break;
+		case 2: tex = gm.GetButtonTextureId(gpbind::ButtonId::West);  break;
+		case 3: tex = gm.GetEngineActionTextureId("left");            break;
+		default: break;
+		}
+		return (tex && tex[0]) ? tex : kGpHints[idx].tex;
+	}
+}
+
+void CUITalkDialogWnd::GpInitHints()
+{
+	for (int i = 0; i < 4; ++i)
+	{
+		m_gpHintIcon[i] = xr_new<CUIStatic>();
+		m_gpHintIcon[i]->SetAutoDelete(true);
+		m_gpHintIcon[i]->Enable(false);
+		m_gpHintIcon[i]->SetStretchTexture(true);
+		m_gpHintIcon[i]->InitTexture(GpResolveHintTex(i));
+		AttachChild(m_gpHintIcon[i]);
+		m_gpHintText[i] = xr_new<CUITextWnd>();
+		m_gpHintText[i]->SetAutoDelete(true);
+		m_gpHintText[i]->SetFont(UI().Font().pFontLetterica18Russian);
+		m_gpHintText[i]->SetTextColor(color_argb(235, 220, 220, 220));
+		m_gpHintText[i]->SetVTextAlignment(valCenter);
+		m_gpHintText[i]->SetText(ResolveTalkHintText(kGpHints[i]));
+		AttachChild(m_gpHintText[i]);
+		m_gpHintIcon[i]->Show(false);
+		m_gpHintText[i]->Show(false);
+	}
+}
+
+void CUITalkDialogWnd::GpShowHints(bool on)
+{
+	static u32 s_lastGlyphRev = 0;
+	CGamepadGlyphManager& gm = CGamepadGlyphManager::Instance();
+	if (!on || !gm.AreHintsVisible(true))
+	{
+		if (m_gpHintsShown)
+		{
+			for (int i = 0; i < 4; ++i)
+			{
+				m_gpHintIcon[i]->Show(false);
+				m_gpHintText[i]->Show(false);
+			}
+			m_gpHintsShown = false;
+		}
+		if (!on)
+			s_lastGlyphRev = 0;
+		return;
+	}
+	const u32 rev = gm.GetPromptRevision();
+	if (!m_gpHintsShown || s_lastGlyphRev != rev)
+	{
+		for (int i = 0; i < 4; ++i)
+			m_gpHintIcon[i]->InitTexture(GpResolveHintTex(i));
+		s_lastGlyphRev = rev;
+	}
+	if (Device.dwWidth == 0 || Device.dwHeight == 0)
+		return;
+	const float W = (float)Device.dwWidth, H = (float)Device.dwHeight;
+	const float ux = H / 1080.0f * 1024.0f / W; // one 1080p pixel in horizontal UI units
+	const float scale = clampr(gm.GetIconScaleFactor(), 0.5f, 1.5f);
+	// INV-REWORK-24: Dot Marks 28 px = 22 visible + 2*3 PAD at scale 1.0, whole screen pixels
+	const float iconPx = _max(8.0f, floorf(kGpHintTexPx * scale * H / 1080.0f + 0.5f));
+	const float pad1080 = kGpHintPadPx * scale;
+	const float iconW = iconPx * 1024.0f / W;
+	const float iconH = iconPx * 768.0f / H;
+	const float tgap = _max(2.0f, kGpHintTextPx - pad1080) * ux;
+	const float gap = _max(4.0f, kGpHintGapPx - pad1080) * ux;
+	const float rightGap = _max(2.0f, kGpHintRightPx - pad1080) * ux;
+	const float y = floorf(kGpHintCY * H / 768.0f - iconPx * 0.5f + 0.5f) * 768.0f / H;
+	// label box: its lower-case middle (x-height, Letterica18) on the icon middle, not the box middle
+	const float ty = y - GpHintXray::XMidBelowCellCenterUi(UI().Font().pFontLetterica18Russian);
+	const bool trade = UIToTradeButton.IsShown();
+	float tw[4] = {};
+	float total = 0.0f;
+	int shown = 0;
+	for (int i = 0; i < 4; ++i)
+	{
+		if (i == 2 && !trade)
+			continue;
+		// Refresh localized text before measuring width so live reload_language() updates layout
+		m_gpHintText[i]->SetText(ResolveTalkHintText(kGpHints[i]));
+		// real text width from the font, so the gaps are even
+		m_gpHintText[i]->AdjustWidthToText();
+		tw[i] = m_gpHintText[i]->GetWidth();
+		total += iconW + tgap + tw[i];
+		if (shown++)
+			total += gap;
+	}
+	if (trade)
+	{
+		LPCSTR xLabel = UIToTradeButton.TextItemControl()->GetText();
+		if ((!xLabel || !xLabel[0]) && CStringTable::getPData())
+			xLabel = CStringTable().translate(mechanic_mode ? "ui_st_upgrade" : "ui_st_trade").c_str();
+		if (!xLabel || !xLabel[0])
+		{
+			static const SGpHint kRepairHint = { "ui_gp_xbox_west", "ui_gp_eng_talk_repair", "\xD0\xE5\xEC\xEE\xED\xF2" };
+			xLabel = mechanic_mode ? ResolveTalkHintText(kRepairHint) : ResolveTalkHintText(kGpHints[2]);
+		}
+		if (0 != xr_strcmp(m_gpHintText[2]->GetText(), xLabel))
+		{
+			const float oldW = tw[2];
+			m_gpHintText[2]->SetText(xLabel);
+			m_gpHintText[2]->AdjustWidthToText();
+			tw[2] = m_gpHintText[2]->GetWidth();
+			total += (tw[2] - oldW);
+		}
+	}
+	float x = kGpHintFrameR - rightGap - total;
+	for (int i = 0; i < 4; ++i)
+	{
+		const bool vis = !(i == 2 && !trade);
+		m_gpHintIcon[i]->Show(vis);
+		m_gpHintText[i]->Show(vis);
+		if (!vis)
+			continue;
+		// icon and text share one midline: both boxes are iconH tall around kGpHintCY, text centred vertically
+		m_gpHintIcon[i]->SetWndPos(Fvector2().set(x, y));
+		m_gpHintIcon[i]->SetWndSize(Fvector2().set(iconW, iconH));
+		m_gpHintText[i]->SetWndPos(Fvector2().set(x + iconW + tgap, ty));
+		m_gpHintText[i]->SetWndSize(Fvector2().set(tw[i] + 2.0f, iconH));
+		x += iconW + tgap + tw[i] + gap;
+	}
+	m_gpHintsShown = true;
+}
+
+void CUITalkDialogWnd::GpReset()
+{
+	GpShowHints(false);
+	m_gpAnsAccum = 0.0f;
+	if (!UIQuestionsList || m_gpBaseX < 0.0f)
+		return;
+	const u32 n = UIQuestionsList->GetSize();
+	for (u32 i = 0; i < n; ++i)
+	{
+		CUIQuestionItem* it = smart_cast<CUIQuestionItem*>(UIQuestionsList->GetItem(i));
+		if (!it || !it->m_text)
+			continue;
+		Fvector2 p = it->m_text->GetWndPos();
+		p.x = m_gpBaseX;
+		it->m_text->SetWndPos(p);
+		it->m_text->SetTextBlend(-1.0f);
+	}
+}
+
+void CUITalkDialogWnd::GpGetListRect(Frect& out)
+{
+	out.set(0, 0, 0, 0);
+	if (UIAnswersList)
+		UIAnswersList->GetAbsoluteRect(out);
+}
+
+bool CUITalkDialogWnd::GpSelectedCenter(Fvector2& out)
+{
+	if (!UIQuestionsList)
+		return false;
+	CUIQuestionItem* it = smart_cast<CUIQuestionItem*>(UIQuestionsList->GetItem((u32)m_gpSel));
+	if (!it || !it->m_text)
+		return false;
+	Frect r;
+	it->m_text->GetAbsoluteRect(r);
+	out.set((r.x1 + r.x2) * 0.5f, (r.y1 + r.y2) * 0.5f);
+	return true;
+}
+
+void CUITalkDialogWnd::GpUpdate(float dtMs, float rsY)
+{
+	if (!UIQuestionsList || !UIAnswersList)
+		return;
+	GpShowHints(true);
+	if (m_gpBaseX < 0.0f)
+		m_gpBaseX = m_uiXml ? m_uiXml->ReadAttribFlt("question_item:content_text", 0, "x", 15.0f) : 15.0f;
+	const int n = (int)UIQuestionsList->GetSize();
+	if (m_gpSel >= n)
+		m_gpSel = _max(0, n - 1);
+
+	const float k = 1.0f - expf(-_max(dtMs, 1.0f) / 55.0f); // плавное скольжение (~0,15 с)
+	for (int i = 0; i < n; ++i)
+	{
+		CUIQuestionItem* it = smart_cast<CUIQuestionItem*>(UIQuestionsList->GetItem((u32)i));
+		if (!it || !it->m_text)
+			continue;
+		Fvector2 p = it->m_text->GetWndPos();
+		const float target = m_gpBaseX + ((i == m_gpSel) ? kGpShiftPx : 0.0f);
+		p.x += (target - p.x) * k;
+		if (_abs(target - p.x) < 0.25f)
+			p.x = target;
+		it->m_text->SetWndPos(p);
+		it->m_text->SetTextBlend(clampr((p.x - m_gpBaseX) / kGpShiftPx, 0.0f, 1.0f)); // цвет плывёт вместе со сдвигом
+	}
+
+	// выбранная реплика всегда в видимой части списка
+	if (n > 0)
+	{
+		CUIWindow* sel = UIQuestionsList->GetItem((u32)m_gpSel);
+		if (sel)
+		{
+			const float y1 = sel->GetWndPos().y;
+			const float y2 = y1 + sel->GetHeight();
+			const float h = UIQuestionsList->GetHeight();
+			const int cur = UIQuestionsList->GetCurrentScrollPos();
+			if (y1 < (float)cur)
+				UIQuestionsList->SetScrollPos(iFloor(y1));
+			else if (y2 > (float)cur + h)
+				UIQuestionsList->SetScrollPos(iCeil(y2 - h));
+		}
+	}
+
+	// правый стик: история листается попиксельно (стик вниз = вниз), ~450 px/с при полном отклонении
+	if (_abs(rsY) >= 0.08f)
+	{
+		m_gpAnsAccum += rsY * 0.45f * dtMs;
+		const int whole = (int)m_gpAnsAccum;
+		if (whole != 0)
+		{
+			m_gpAnsAccum -= (float)whole;
+			UIAnswersList->SetScrollPos(UIAnswersList->GetCurrentScrollPos() + whole);
+		}
+	}
+	else
+		m_gpAnsAccum = 0.0f;
+}
+
 void CUITalkDialogWnd::ClearAll()
 {
 	UIAnswersList->Clear();
@@ -172,6 +469,7 @@ void CUITalkDialogWnd::ClearAll()
 
 void CUITalkDialogWnd::ClearQuestions()
 {
+	m_gpSel = 0;
 	UIQuestionsList->Clear();
 }
 

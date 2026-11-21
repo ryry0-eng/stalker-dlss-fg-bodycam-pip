@@ -279,6 +279,11 @@ bool CLevel::net_start6()
 
 	if (net_start_result_total)
 	{
+		// Level geometry can load on a worker. Capture pumps keyboard/mouse events
+		// and can invoke Lua synchronously, so do it on the main loading-event thread.
+		if (!g_dedicated_server && bReady)
+			IR_Capture();
+
 		if (strstr(Core.Params, "-$"))
 		{
 			string256 buf, cmd, param;

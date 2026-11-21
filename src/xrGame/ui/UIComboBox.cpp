@@ -7,7 +7,14 @@
 
 #define CB_HEIGHT 20.0f
 
-CUIComboBox::CUIComboBox()
+namespace
+{
+	xrCriticalSection s_combo_render_cs;
+	xr_vector<CUIComboBox*> s_combo_render_list;
+	std::atomic<u32> s_combo_render_count{0};
+}
+
+CUIComboBox::CUIComboBox() : m_bInSeqRender(false)
 {
 	AttachChild(&m_frameLine);
 	AttachChild(&m_text);
@@ -25,10 +32,72 @@ CUIComboBox::CUIComboBox()
 
 CUIComboBox::~CUIComboBox()
 {
-	// Update() registers the expanded list for the following render pass.
-	// The window can be destroyed before that pass (menu/dialog teardown), so
-	// always remove the callback while the concrete object is still alive.
+	UnregisterFromRender();
 	Device.seqRender.Remove(this);
+}
+
+void CUIComboBox::RegisterForRender()
+{
+	xrCriticalSectionGuard guard(s_combo_render_cs);
+	Device.seqRender.Remove(this);
+	Device.seqRender.Add(this, 3);
+	if (std::find(s_combo_render_list.begin(), s_combo_render_list.end(), this) == s_combo_render_list.end())
+	{
+		s_combo_render_list.push_back(this);
+		s_combo_render_count.store(static_cast<u32>(s_combo_render_list.size()), std::memory_order_release);
+	}
+	m_bInSeqRender.store(true, std::memory_order_release);
+}
+
+void CUIComboBox::UnregisterFromRender()
+{
+	if (!m_bInSeqRender.load(std::memory_order_acquire))
+		return;
+	xrCriticalSectionGuard guard(s_combo_render_cs);
+	if (!m_bInSeqRender.load(std::memory_order_relaxed))
+		return;
+	m_bInSeqRender.store(false, std::memory_order_release);
+	auto it = std::find(s_combo_render_list.begin(), s_combo_render_list.end(), this);
+	if (it != s_combo_render_list.end())
+	{
+		s_combo_render_list.erase(it);
+		s_combo_render_count.store(static_cast<u32>(s_combo_render_list.size()), std::memory_order_release);
+	}
+	Device.seqRender.Remove(this);
+}
+
+void CUIComboBox::RemoveFromRenderTree(CUIWindow* root)
+{
+	if (!root || s_combo_render_count.load(std::memory_order_acquire) == 0)
+		return;
+	xrCriticalSectionGuard guard(s_combo_render_cs);
+	for (size_t i = s_combo_render_list.size(); i-- > 0;)
+	{
+		CUIComboBox* cb = s_combo_render_list[i];
+		bool match = false;
+		for (CUIWindow* p = cb; p != nullptr; p = p->GetParent())
+		{
+			if (p == root)
+			{
+				match = true;
+				break;
+			}
+		}
+		if (match)
+		{
+			cb->m_bInSeqRender.store(false, std::memory_order_release);
+			s_combo_render_list.erase(s_combo_render_list.begin() + i);
+			Device.seqRender.Remove(cb);
+		}
+	}
+	s_combo_render_count.store(static_cast<u32>(s_combo_render_list.size()), std::memory_order_release);
+}
+
+void CUIComboBox::Show(bool status)
+{
+	CUIWindow::Show(status);
+	if (!status)
+		UnregisterFromRender();
 }
 
 void CUIComboBox::SetListLength(int length)
@@ -234,14 +303,17 @@ void CUIComboBox::ShowList(bool bShow)
 		SetHeight(m_text.GetHeight() + m_list_box.GetHeight());
 		m_list_frame.Show(true);
 		m_eState = LIST_EXPANDED;
-		GetParent()->SetCapture(this, true);
+		if (GetParent())
+			GetParent()->SetCapture(this, true);
 	}
 	else
 	{
 		m_list_frame.Show(false);
 		SetHeight(m_frameLine.GetHeight());
 		m_eState = LIST_FONDED;
-		GetParent()->SetCapture(this, false);
+		if (GetParent())
+			GetParent()->SetCapture(this, false);
+		UnregisterFromRender();
 	}
 }
 
@@ -252,10 +324,15 @@ void CUIComboBox::Update()
 	{
 		m_frameLine.SetCurrentState(S_Disabled);
 		m_text.SetTextColor(m_textColor[1]);
+		UnregisterFromRender();
 	}
 	else
 	{
 		m_text.SetTextColor(m_textColor[0]);
+		if (m_list_frame.IsShown())
+			RegisterForRender();
+		else
+			UnregisterFromRender();
 	}
 }
 
@@ -317,14 +394,24 @@ void CUIComboBox::SendMessage(CUIWindow* pWnd, s16 msg, void* pData)
 
 void CUIComboBox::OnRender()
 {
-	if (!m_list_frame.IsShown())
-		return;
-
-	for (CUIWindow* wnd = this; wnd; wnd = wnd->GetParent())
-		if (!wnd->IsShown())
-			return;
-
-	m_list_frame.Draw();
+	if (IsShown() && m_list_frame.IsShown())
+	{
+		bool parent_shown = true;
+		for (CUIWindow* wnd = this; wnd; wnd = wnd->GetParent())
+		{
+			if (!wnd->IsShown())
+			{
+				parent_shown = false;
+				break;
+			}
+		}
+		if (parent_shown)
+			m_list_frame.Draw();
+	}
+	if (m_bInSeqRender.load(std::memory_order_acquire))
+		UnregisterFromRender();
+	else
+		Device.seqRender.Remove(this);
 }
 
 void CUIComboBox::Draw()

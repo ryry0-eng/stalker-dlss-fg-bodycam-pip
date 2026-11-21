@@ -17,6 +17,7 @@
 #include "ui\UIPdaWnd.h"
 #include "ai_sounds.h"
 #include "Inventory.h"
+#include "../xrEngine/xr_input.h"
 
 CPda::CPda(void)
 {
@@ -201,6 +202,13 @@ void CPda::OnAnimationEnd(u32 state)
 		}
 		SetPending(FALSE);
 		SwitchState(eIdle);
+		if (pInput && pInput->IsGamepadActiveSource() && CurrentGameUI() && CurrentGameUI()->GetPdaMenu().IsShown())
+		{
+			m_bZoomed = true;
+			CurrentGameUI()->GetPdaMenu().Enable(true);
+			if (Actor())
+				Actor()->StopSprint();
+		}
 	}
 	break;
 	case eHiding:
@@ -354,7 +362,15 @@ void CPda::UpdateCL()
 		{
 			pda->ShowDialog(false); // Don't hide indicators
 			m_bNoticedEmptyBattery = false;
-			if (m_eDeferredEnable == eEnable) // Don't disable input if it was enabled before opening the Main Menu.
+			if (pInput && pInput->IsGamepadActiveSource())
+			{
+				m_bZoomed = true;
+				m_eDeferredEnable = eDefault;
+				pda->Enable(true);
+				if (Actor())
+					Actor()->StopSprint();
+			}
+			else if (m_eDeferredEnable == eEnable) // Don't disable input if it was enabled before opening the Main Menu.
 				m_eDeferredEnable = eDefault;
 			else
 				pda->Enable(false);
@@ -461,8 +477,14 @@ bool CPda::Action(u16 cmd, u32 flags)
 		break;
 
 		case kWPN_RELOAD:
-		if (flags & CMD_START && !IsPending())
+		if (flags & CMD_START)
 		{
+			if (IsPending())
+			{
+				m_eDeferredEnable = eEnableZoomed;
+				m_bZoomed = true;
+				return true;
+			}
 			m_bZoomed = !m_bZoomed;
 			if (m_bZoomed)
 			{
@@ -502,7 +524,7 @@ bool CPda::Action(u16 cmd, u32 flags)
 
 		case kINVENTORY:
 		{
-			if (flags & CMD_START && pda->IsEnabled())
+			if (flags & CMD_START && pda->IsShown())
 			{
 				if (GetState() != eHidden && GetState() != eHiding)
 				{
