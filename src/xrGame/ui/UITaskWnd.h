@@ -31,9 +31,6 @@ private:
 	CUIStatic* m_right_bottom_background;
 
 	CUIMapWnd* m_pMapWnd;
-public:
-	CUIMapWnd* GetMapWnd() const { return m_pMapWnd; } // MT-MAY: геймпадный доступ к карте
-private:
 	CUITaskItem* m_pStoryLineTaskItem;
 
 	CUI3tButton* m_BtnTaskListWnd;
